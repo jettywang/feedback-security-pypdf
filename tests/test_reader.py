@@ -3589,3 +3589,230 @@ def test_get_object_from_stream__duplicate_offsets() -> None:
 
     with pytest.raises(PdfReadError, match=r"^Invalid offset 0 in object stream 1\.$"):
         _ = reader.root_object
+
+
+def _make_incremental_free_pdf(*, damage_last_xref: bool) -> bytes:
+    """
+    Build a two-revision classical-xref PDF.
+
+    Revision 1 exposes a JavaScript action (object 4) through the catalog's
+    /OpenAction. Revision 2 removes that reference and marks object 4 free.
+    The old action bytes stay in the file, as happens after an incremental
+    save. With ``damage_last_xref`` the newest ``xref`` keyword is destroyed so
+    the reader has to rebuild the cross-reference table.
+    """
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets: dict[int, int] = {}
+
+    offsets[1] = len(pdf)
+    pdf += b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OpenAction 4 0 R >>\nendobj\n"
+    offsets[2] = len(pdf)
+    pdf += b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+    offsets[3] = len(pdf)
+    pdf += b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>\nendobj\n"
+    offsets[4] = len(pdf)
+    pdf += b"4 0 obj\n<< /Type /Action /S /JavaScript /JS (RESURRECTION_MARKER) >>\nendobj\n"
+
+    first_xref = len(pdf)
+    pdf += b"xref\n0 5\n0000000000 65535 f \n"
+    for number in range(1, 5):
+        pdf += b"%010d 00000 n \n" % offsets[number]
+    pdf += b"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % first_xref
+
+    new_catalog = len(pdf)
+    pdf += b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    new_object = len(pdf)
+    pdf += b"5 0 obj\n<< /Title (CLEAN_REVISION) >>\nendobj\n"
+
+    last_xref = len(pdf)
+    pdf += b"xref\n0 1\n0000000000 65535 f \n"
+    pdf += b"1 1\n%010d 00000 n \n" % new_catalog
+    pdf += b"4 1\n0000000000 00001 f \n"
+    pdf += b"5 1\n%010d 00000 n \n" % new_object
+    pdf += b"trailer\n<< /Size 6 /Root 1 0 R /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (
+        first_xref,
+        last_xref,
+    )
+
+    if damage_last_xref:
+        for index in range(4):
+            pdf[last_xref + index] = b"Z???"[index]
+    return bytes(pdf)
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_freed_object_is_not_resurrected_intact_xref(strict: bool) -> None:
+    """A free entry hides the stale object even though its bytes remain."""
+    data = _make_incremental_free_pdf(damage_last_xref=False)
+    assert b"RESURRECTION_MARKER" in data  # bytes are still present
+
+    reader = PdfReader(BytesIO(data), strict=strict)
+    assert len(reader.pages) == 1
+    assert "/OpenAction" not in reader.root_object
+    assert isinstance(reader.get_object(4), NullObject)
+    # The clean revision's object still resolves normally.
+    assert reader.get_object(5)[NameObject("/Title")] == "CLEAN_REVISION"
+
+
+def test_freed_object_is_not_resurrected_after_xref_rebuild() -> None:
+    """Rebuilding a damaged last xref keeps the deleted object free."""
+    data = _make_incremental_free_pdf(damage_last_xref=True)
+    assert b"RESURRECTION_MARKER" in data
+
+    reader = PdfReader(BytesIO(data), strict=False)
+    assert len(reader.pages) == 1
+    assert "/OpenAction" not in reader.root_object
+    assert isinstance(reader.get_object(4), NullObject)
+    assert reader.get_object(5)[NameObject("/Title")] == "CLEAN_REVISION"
+
+    # No object reachable through the reader may carry the deleted marker.
+    for generation, entries in reader.xref.items():
+        for number in entries:
+            resolved = reader.get_object(IndirectObject(number, generation, reader))
+            assert "RESURRECTION_MARKER" not in repr(resolved)
+
+
+def test_freed_object_rebuild_strict_mode_raises() -> None:
+    """Strict mode refuses a damaged cross-reference instead of rebuilding."""
+    data = _make_incremental_free_pdf(damage_last_xref=True)
+    with pytest.raises(PdfReadError, match="Broken xref table"):
+        PdfReader(BytesIO(data), strict=True)
+
+
+def _make_xref_stream_free_pdf(*, bad_pointer: bool) -> bytes:
+    """Pure PDF 1.5 file whose second XRef stream frees object 4."""
+    pdf = bytearray(b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n")
+    offsets: dict[int, int] = {}
+    bodies = {
+        1: b"<< /Type /Catalog /Pages 2 0 R /OpenAction 4 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+        4: b"<< /Type /Action /S /JavaScript /JS (STREAM_FREE_MARKER) >>",
+    }
+    for number in range(1, 5):
+        offsets[number] = len(pdf)
+        pdf += b"%d 0 obj " % number + bodies[number] + b" endobj\n"
+
+    def write_xref_stream(
+        object_number: int,
+        size: int,
+        entries: list[bytes],
+        self_offset: int,
+        prev: int | None,
+    ) -> None:
+        # Fill the stream's own in-use entry now that its offset is known.
+        entries[object_number] = struct.pack(">BIB", 1, self_offset, 0)
+        body = b"".join(entries)
+        dictionary = (
+            b"<< /Type /XRef /Size %d /Root 1 0 R /W [1 4 1] /Length %d"
+            % (size, len(body))
+        )
+        if prev is not None:
+            dictionary += b" /Prev %d" % prev
+        pdf.extend(b"%d 0 obj " % object_number + dictionary + b" >>\nstream\n")
+        pdf.extend(body)
+        pdf.extend(b"\nendstream\nendobj\n")
+
+    first_entries = [struct.pack(">BIB", 0, 0, 255)]
+    first_entries += [struct.pack(">BIB", 1, offsets[n], 0) for n in range(1, 5)]
+    first_entries.append(b"")  # placeholder, index 5, replaced with the self entry
+    first_xref = len(pdf)  # offset of the "5 0 obj" header
+    write_xref_stream(5, 6, first_entries, first_xref, None)
+    pdf += b"startxref\n%d\n%%%%EOF\n" % first_xref
+
+    clean_catalog = len(pdf)
+    pdf += b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+    second_entries = [
+        struct.pack(">BIB", 0, 0, 255),
+        struct.pack(">BIB", 1, clean_catalog, 0),
+        struct.pack(">BIB", 1, offsets[2], 0),
+        struct.pack(">BIB", 1, offsets[3], 0),
+        struct.pack(">BIB", 0, 0, 0),
+        struct.pack(">BIB", 1, first_xref, 0),
+        b"",  # placeholder, index 6, replaced with the self entry
+    ]
+    second_xref = len(pdf)  # offset of the "6 0 obj" header
+    write_xref_stream(6, 7, second_entries, second_xref, first_xref)
+    pdf += b"startxref\n%d\n%%%%EOF\n" % second_xref
+
+    if bad_pointer:
+        keyword = pdf.rfind(b"startxref")
+        line_end = pdf.find(b"\n", keyword)
+        next_end = pdf.find(b"\n", line_end + 1)
+        pdf[line_end + 1:next_end] = b"3"
+    return bytes(pdf)
+
+
+def test_xref_stream_freed_object_not_resurrected() -> None:
+    """Type-0 XRef stream entries keep the deleted object null."""
+    data = _make_xref_stream_free_pdf(bad_pointer=False)
+    reader = PdfReader(BytesIO(data), strict=False)
+    assert isinstance(reader.get_object(4), NullObject)
+    assert "/OpenAction" not in reader.root_object
+    assert len(reader.pages) == 1
+
+    # A valid, undamaged cross-reference stream reads the same in strict mode.
+    strict_reader = PdfReader(BytesIO(data), strict=True)
+    assert isinstance(strict_reader.get_object(4), NullObject)
+    assert len(strict_reader.pages) == 1
+
+
+def test_xref_stream_freed_object_survives_rebuild() -> None:
+    """A broken startxref still rebuilds without reviving a stream-freed object."""
+    data = _make_xref_stream_free_pdf(bad_pointer=True)
+    reader = PdfReader(BytesIO(data), strict=False)
+    assert isinstance(reader.get_object(4), NullObject)
+    assert "/OpenAction" not in reader.root_object
+    assert len(reader.pages) == 1
+
+
+def _make_generation_bump_free_pdf(*, damage_last_xref: bool) -> bytes:
+    """Classical xref PDF where object 4 is freed with a generation bump."""
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets: dict[int, int] = {}
+    offsets[1] = len(pdf)
+    pdf += b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /AA << /O 4 0 R >> >>\nendobj\n"
+    offsets[2] = len(pdf)
+    pdf += b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+    offsets[3] = len(pdf)
+    pdf += b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>\nendobj\n"
+    offsets[4] = len(pdf)
+    pdf += b"4 0 obj\n<< /Type /Action /S /JavaScript /JS (GEN_BUMP_MARKER) >>\nendobj\n"
+
+    first_xref = len(pdf)
+    pdf += b"xref\n0 5\n0000000000 65535 f \n"
+    for number in range(1, 5):
+        pdf += b"%010d 00000 n \n" % offsets[number]
+    pdf += b"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % first_xref
+
+    clean_catalog = len(pdf)
+    pdf += b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    last_xref = len(pdf)
+    pdf += b"xref\n0 1\n0000000000 65535 f \n"
+    pdf += b"1 1\n%010d 00000 n \n" % clean_catalog
+    pdf += b"4 1\n0000000000 00001 f \n"  # deleted; reuse generation would be 1
+    pdf += b"trailer\n<< /Size 5 /Root 1 0 R /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (
+        first_xref,
+        last_xref,
+    )
+
+    if damage_last_xref:
+        for index in range(4):
+            pdf[last_xref + index] = b"Z???"[index]
+    return bytes(pdf)
+
+
+@pytest.mark.parametrize("damage_last_xref", [False, True])
+def test_generation_bump_freed_object_is_null(damage_last_xref: bool) -> None:
+    """Both the old and the reuse generation of a deleted object resolve null."""
+    if damage_last_xref:
+        data = _make_generation_bump_free_pdf(damage_last_xref=True)
+        reader = PdfReader(BytesIO(data), strict=False)
+    else:
+        data = _make_generation_bump_free_pdf(damage_last_xref=False)
+        reader = PdfReader(BytesIO(data))
+
+    assert isinstance(reader.get_object(IndirectObject(4, 0, reader)), NullObject)
+    assert isinstance(reader.get_object(IndirectObject(4, 1, reader)), (NullObject, type(None)))
+    assert len(reader.pages) == 1
+    assert "/AA" not in reader.root_object

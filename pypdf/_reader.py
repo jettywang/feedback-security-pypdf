@@ -566,6 +566,13 @@ class PdfReader(PdfDocCommon):
         if key in self.resolved_objects:
             return retval
 
+        if self.xref_free_entry.get(indirect_reference.generation, {}).get(
+            indirect_reference.idnum, False
+        ):
+            # A cross-reference section (including one recovered while
+            # rebuilding a damaged file) declares this object free. Resolve it
+            # to null instead of reading stale bytes or a compressed copy.
+            return NullObject()
         if (
             indirect_reference.generation == 0
             and indirect_reference.idnum in self.xref_objStm
@@ -591,6 +598,13 @@ class PdfReader(PdfDocCommon):
             except MemoryError:  # pragma: no cover  # TODO: BLE001
                 raise
             except Exception:
+                if self.xref_free_entry.get(indirect_reference.generation, {}).get(
+                    indirect_reference.idnum, False
+                ):
+                    # The cross-reference table declares this object free; do
+                    # not scan the file for stale bytes left behind by an
+                    # incremental update that deleted it.
+                    return NullObject()
                 buf = get_stream_data(self.stream)
                 m = re.search(
                     rf"\s{indirect_reference.idnum}\s+{indirect_reference.generation}\s+obj".encode(),
@@ -647,6 +661,20 @@ class PdfReader(PdfDocCommon):
                     strict=self.strict,
                 )
         else:
+            if self.xref_free_entry.get(indirect_reference.generation, {}).get(
+                indirect_reference.idnum, False
+            ):
+                # Declared free by a cross-reference section; any matching bytes
+                # in the file are leftovers of a deleted revision, not a live
+                # object. Returning null matches the behaviour for free entries
+                # found through the regular xref lookup above.
+                logger_warning(
+                    "Object %(idnum)d %(generation)d is free, returning null.",
+                    source=__name__,
+                    idnum=indirect_reference.idnum,
+                    generation=indirect_reference.generation,
+                )
+                return NullObject()
             buf = get_stream_data(self.stream)
             m = re.search(
                 rf"\s{indirect_reference.idnum}\s+{indirect_reference.generation}\s+obj".encode(),
@@ -1144,38 +1172,80 @@ class PdfReader(PdfDocCommon):
                         offset = -1
                         entry_type_b = b"f"
                     else:
-                        logger_warning(
-                            "entry %(num)d in Xref table invalid but object found",
-                            source=__name__,
-                            num=num,
-                        )
-                        generation, offset = recovery_cache[num]
-                        entry_type_b = b"n"
+                        cached_generation = recovery_cache[num][1]
+                        if self.xref_free_entry.get(
+                            0 if cached_generation >= 65535 else cached_generation, {}
+                        ).get(num, False):
+                            # A newer cross-reference section already declared
+                            # this object free; do not let an unparseable entry
+                            # of an older section revive its stale bytes.
+                            logger_warning(
+                                "entry %(num)d in Xref table invalid but object is free, "
+                                "keeping it free",
+                                source=__name__,
+                                num=num,
+                            )
+                            generation = 65535
+                            offset = -1
+                            entry_type_b = b"f"
+                        else:
+                            logger_warning(
+                                "entry %(num)d in Xref table invalid but object found",
+                                source=__name__,
+                                num=num,
+                            )
+                            generation, offset = recovery_cache[num]
+                            entry_type_b = b"n"
 
+                is_free = entry_type_b == b"f"
+                if is_free:
+                    # Sections are read newest-first through /Prev. If a newer
+                    # section already lists this object number as in use, this
+                    # older free record is stale (the object was reallocated);
+                    # keep the newer in-use entry instead of freeing it.
+                    already_in_use = num in self.xref.get(0, {}) or (
+                        generation < 65535 and num in self.xref.get(generation, {})
+                    )
+                    # A classical free record is "next_free generation f".
+                    # The first field is the free-list pointer; the second is
+                    # the generation the object would receive on reuse. Object
+                    # 0 permanently anchors the free list and is not a real
+                    # object, so it is skipped. Any other object deleted at
+                    # generation 0 carries a reuse generation of 1 while live
+                    # references still use generation 0; mark both so
+                    # get_object() cannot resurrect the deleted object's stale
+                    # bytes regardless of the referenced generation.
+                    if num != 0 and not already_in_use:
+                        if generation >= 65535:
+                            free_generations = (0,)
+                        else:
+                            free_generations = (max(0, generation - 1), generation)
+                        for gen_key in free_generations:
+                            if gen_key not in self.xref:
+                                self.xref[gen_key] = {}
+                            # A free entry in a newer revision overrides an
+                            # in-use entry an older revision still carries for
+                            # the same object number, so the stale bytes of the
+                            # deleted object must be dropped.
+                            self.xref[gen_key].pop(num, None)
+                            self.xref_free_entry.setdefault(gen_key, {})[num] = True
+                    cnt += 1
+                    num += 1
+                    continue
                 if generation not in self.xref:
                     self.xref[generation] = {}
                     self.xref_free_entry[generation] = {}
-                if num in self.xref[generation]:
+                if num in self.xref[generation] or self.xref_free_entry.get(generation, {}).get(num, False):
                     # It really seems like we should allow the last
                     # xref table in the file to override previous
                     # ones. Since we read the file backwards, assume
-                    # any existing key is already set correctly.
+                    # any existing key is already set correctly. An object a
+                    # newer revision marked free must never be revived by an
+                    # older in-use entry encountered later in the chain.
                     pass
                 else:
-                    if entry_type_b == b"n":
-                        self.xref[generation][num] = offset
-                    try:
-                        self.xref_free_entry[generation][num] = entry_type_b == b"f"
-                    except MemoryError:  # pragma: no cover  # TODO: BLE001
-                        raise
-                    except Exception:
-                        pass
-                    try:
-                        self.xref_free_entry[65535][num] = entry_type_b == b"f"
-                    except MemoryError:  # pragma: no cover  # TODO: BLE001
-                        raise
-                    except Exception:
-                        pass
+                    self.xref[generation][num] = offset
+                    self.xref_free_entry.setdefault(generation, {})[num] = False
                 cnt += 1
                 num += 1
             read_non_whitespace(stream)
@@ -1555,14 +1625,134 @@ class PdfReader(PdfDocCommon):
 
             index += 7  # len(b"trailer")
 
+    def _recover_free_objects_from_xref_bytes(self, data: bytes) -> set[int]:
+        """
+        Recover object numbers marked free inside damaged classical xref tables.
+
+        Scans every cross-reference subsection header (``first count``) in file
+        order, then walks the fixed-width 20-byte records that follow it so a
+        free record can be mapped back to its object number even when the
+        enclosing ``xref`` keyword or a section header was corrupted. The last
+        occurrence wins, matching the newest-revision-wins semantics of
+        incremental updates.
+        """
+        free_objects: dict[int, int] = {}
+        # A subsection header: two non-negative integers on their own line.
+        header_pattern = re.compile(rb"(?:\r\n|[\r\n])(\d+)\s+(\d+)(?:\r\n|[\r\n])")
+        record_pattern = re.compile(rb"(\d{10}) (\d{5}) ([fn])(?: |\r|\n)")
+        for header in header_pattern.finditer(data):
+            first_object = int(header.group(1))
+            count = int(header.group(2))
+            # Keep subsection counts bounded; a trailer /Size is a weak cap, but
+            # a malformed header claiming a huge count must not dominate runtime.
+            if count <= 0 or count > IndirectObject._MAXIMUM_PART_LENGTH:
+                continue
+            cursor = header.end()
+            valid_records = 0
+            for index in range(count):
+                record = data[cursor:cursor + 20]
+                match = record_pattern.match(record)
+                if not match:
+                    break
+                object_number = first_object + index
+                if match.group(3) == b"f":
+                    free_objects[object_number] = int(match.group(2))
+                else:
+                    free_objects.pop(object_number, None)
+                valid_records += 1
+                cursor += 20
+            if valid_records == 0:
+                # The integers were not actually a subsection (e.g. content
+                # stream coincidence); nothing to recover from this match.
+                continue
+        # Object 0 only anchors the free list; it is never a resolvable object.
+        free_objects.pop(0, None)
+        return set(free_objects)
+
+    def _recover_free_objects_from_xref_stream(self, xref_stream: StreamObject) -> set[int]:
+        """
+        Decode object numbers a cross-reference stream marks free (type 0).
+
+        Used while rebuilding a damaged file: even when the pointer to the
+        newest XRef stream is broken, its bytes can still be parsed, and its
+        free entries must keep the corresponding deleted objects from being
+        resurrected. Mirrors the ``/W`` and ``/Index`` semantics of the regular
+        PDF 1.5 cross-reference stream reader.
+        """
+        try:
+            entry_sizes = cast(list[int], xref_stream["/W"])
+            size = cast(int, xref_stream["/Size"])
+        except (KeyError, AssertionError):
+            return set()
+        if len(entry_sizes) < 3 or not entry_sizes[0]:
+            return set()
+        index_pairs = cast(list[int], xref_stream.get("/Index", [0, size]))
+        stream_data = BytesIO(xref_stream.get_data())
+        free_objects: set[int] = set()
+        for start, count in self._pairs(index_pairs):
+            for offset_index in range(count):
+                type_bytes = stream_data.read(entry_sizes[0])
+                if len(type_bytes) < entry_sizes[0]:
+                    return free_objects
+                xref_type = convert_to_int(type_bytes, entry_sizes[0])
+                # Field 2 (type 0: next free object; type 1: byte offset).
+                field2_size = entry_sizes[1]
+                stream_data.read(field2_size)
+                # Field 3 is the generation; only its width is needed to advance.
+                field3_size = entry_sizes[2]
+                if len(stream_data.read(field3_size)) < field3_size:
+                    return free_objects
+                # Skip any fields beyond the standard three.
+                extra_width = sum(int(width) for width in entry_sizes[3:])
+                if extra_width:
+                    stream_data.read(extra_width)
+                if xref_type == 0:
+                    object_number = start + offset_index
+                    if object_number:
+                        free_objects.add(object_number)
+                elif xref_type not in (1, 2) and self.strict:
+                    raise PdfReadError(f"Unknown xref type: {xref_type}")
+        return free_objects
+
     def _rebuild_xref_table(self, stream: StreamType) -> None:
         self.xref = {}
         stream.seek(0, 0)
         stream_data = stream.read(-1)
 
+        # Recover free objects from xref table bytes that the regular parser
+        # could not reach because the last cross-reference section was damaged.
+        recovered_free = self._recover_free_objects_from_xref_bytes(stream_data)
+        for object_number in recovered_free:
+            self.xref_free_entry.setdefault(0, {})[object_number] = True
+
+        # Free objects declared by cross-reference streams. Their entries are
+        # decoded below while the streams themselves are parsed, after which the
+        # matching object offsets are pruned from the rebuilt table.
+        stream_freed_objects: set[int] = set()
+
+        # Build a set of object numbers that any still-readable cross-reference
+        # section declared free. When the last xref section is damaged we may
+        # have partially parsed earlier ones, so trust their free entries
+        # instead of blindly resurrecting every object found in the byte
+        # stream. A free object number is blocked across all generations.
+        declared_free = {
+            object_number
+            for entries in self.xref_free_entry.values()
+            for object_number, is_free in entries.items()
+            if is_free
+        }
+
         for object_number, generation_number, object_start in self._find_pdf_objects(stream_data):
+            if object_number in declared_free:
+                # The object was marked free in a readable cross-reference
+                # section (e.g. an incremental update deleted it). Its old
+                # bytes may still be present, but must not be revived.
+                continue
             if generation_number not in self.xref:
                 self.xref[generation_number] = {}
+            # _find_pdf_objects walks the file in order, so for an object
+            # number reused across incremental updates keep the last (newest)
+            # definition rather than the first stale copy.
             self.xref[generation_number][object_number] = object_start
 
         logger_warning("parsing for Object Streams", source=__name__)
@@ -1585,6 +1775,13 @@ class PdfReader(PdfDocCommon):
                             if key in obj:
                                 trailer[NameObject(key)] = obj.raw_get(key)
                         xref_stream_trailers.append((object_start, trailer))
+                        # Recover free objects this XRef stream declares so a
+                        # damaged pointer cannot cause their stale bytes to be
+                        # resurrected during the rebuild. The offsets are pruned
+                        # after this loop because the table is being iterated.
+                        for free_object_number in self._recover_free_objects_from_xref_stream(obj):
+                            stream_freed_objects.add(free_object_number)
+                            self.xref_free_entry.setdefault(0, {})[free_object_number] = True
                         continue
                     if object_type != "/ObjStm":
                         continue
@@ -1630,6 +1827,13 @@ class PdfReader(PdfDocCommon):
                 except Exception:  # could be multiple causes
                     pass
 
+        # Drop offsets for objects a cross-reference stream declared free; the
+        # table could not be mutated while it was being iterated above.
+        for free_object_number in stream_freed_objects:
+            for entries in self.xref.values():
+                entries.pop(free_object_number, None)
+            self.xref_objStm.pop(free_object_number, None)
+
         stream.seek(0, 0)
         trailers: list[tuple[int, dict[Any, Any]]] = list(xref_stream_trailers)
         for position in self._find_pdf_trailers(stream_data):
@@ -1654,24 +1858,52 @@ class PdfReader(PdfDocCommon):
                 xref_type = get_entry(0)
                 # The rest of the elements depend on the xref_type
                 if xref_type == 0:
-                    # linked list of free objects
+                    # linked list of free objects. Field 2 is the next free
+                    # object number (free-list pointer), field 3 is the
+                    # generation the object would receive on reuse. Object 0 is
+                    # always the permanent head of the free list, not a real
+                    # object, so it is skipped. For any other object deleted at
+                    # generation 0, the reuse generation is 1 but live references
+                    # still use 0; mark both generations free. XRef streams are
+                    # read newest-first, so this overrides any in-use entry an
+                    # older section still holds.
                     next_free_object = get_entry(1)  # noqa: F841
-                    next_generation = get_entry(2)  # noqa: F841
+                    reuse_generation = get_entry(2)
+                    # Sections are read newest-first; if a newer section already
+                    # lists this object as in use, this older free record is
+                    # stale (the object was reallocated) and must be ignored.
+                    already_in_use = num in self.xref.get(0, {}) or num in self.xref_objStm
+                    if num != 0 and not already_in_use:
+                        free_generations = (
+                            (0,)
+                            if reuse_generation <= 0
+                            else (max(0, reuse_generation - 1), reuse_generation)
+                        )
+                        for gen_key in free_generations:
+                            self.xref.setdefault(gen_key, {}).pop(num, None)  # type: ignore[union-attr]
+                            self.xref_objStm.pop(num, None)
+                            self.xref_free_entry.setdefault(gen_key, {})[num] = True
                 elif xref_type == 1:
                     # objects that are in use but are not compressed
                     byte_offset = get_entry(1)
                     generation = get_entry(2)
                     if generation not in self.xref:
                         self.xref[generation] = {}  # type: ignore[index]
-                    if not used_before(num, generation):
+                    if not used_before(num, generation) and not self.xref_free_entry.get(
+                        generation, {}
+                    ).get(num, False):
                         self.xref[generation][num] = byte_offset  # type: ignore[index]
+                        self.xref_free_entry.setdefault(generation, {})[num] = False
                 elif xref_type == 2:
                     # compressed objects
                     objstr_num = get_entry(1)
                     obstr_idx = get_entry(2)
                     generation = 0  # PDF spec table 18, generation is 0
-                    if not used_before(num, generation):
+                    if not used_before(num, generation) and not self.xref_free_entry.get(
+                        generation, {}
+                    ).get(num, False):
                         self.xref_objStm[num] = (objstr_num, obstr_idx)
+                        self.xref_free_entry.setdefault(generation, {})[num] = False
                 elif self.strict:
                     raise PdfReadError(f"Unknown xref type: {xref_type}")
 
