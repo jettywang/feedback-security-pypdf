@@ -43,6 +43,54 @@ for attachment in reader.attachment_list:
     print(attachment.name, attachment.alternative_name, attachment.content)
 ```
 
+## Enumerate every actual file
+
+Attachment names are not unique: two embedded files can share a name, and the
+name tree key may differ from the `/UF` (Unicode) or `/F` entry of the file
+specification dictionary. Files may also be referenced from associated files
+(`/AF`) arrays of the catalog, a page or an annotation instead of the embedded
+files name tree. Iterating `attachment_list` reports every actual file exactly
+once, including those only reachable through an `/AF` array or a file
+attachment annotation, even when several of them share a name.
+
+Each attachment exposes the references through which it is reachable. The
+`source` records whether it comes from the name tree or from an associated
+files reference, the exact location of that reference, and the name used
+there:
+
+```{testcode}
+from pypdf import PdfReader
+
+reader = PdfReader("example.pdf")
+
+for attachment in reader.attachment_list:
+    for source in attachment.sources:
+        print(source.kind, source.location, source.name)
+```
+
+Use a content digest to tell same-name files with different content apart.
+The digest is computed on demand from the decoded file content, so no data is
+read until you ask for it:
+
+```{testcode}
+from pypdf import PdfReader
+
+reader = PdfReader("example.pdf")
+
+for attachment in reader.attachment_list:
+    print(attachment.name, attachment.sha256)
+```
+
+The legacy `reader.attachments` mapping is still available and groups every
+matching payload under each of its names (the name tree key and, when
+different, the alternative name):
+
+```{testcode}
+for name, content_list in reader.attachments.items():
+    for content in content_list:
+        print(name, len(content))
+```
+
 ## Add Attachments
 
 To add a new attachment, use the following code:

@@ -1,5 +1,6 @@
 """Test the pypdf.generic._files module."""
 import datetime
+import hashlib
 import shutil
 import subprocess
 from io import BytesIO
@@ -12,7 +13,9 @@ from pypdf.constants import AFRelationship
 from pypdf.errors import PdfReadError, PyPdfError
 from pypdf.generic import (
     ArrayObject,
+    AttachmentSource,
     ByteStringObject,
+    DecodedStreamObject,
     DictionaryObject,
     EmbeddedFile,
     IndirectObject,
@@ -22,7 +25,7 @@ from pypdf.generic import (
     TextStringObject,
     create_string_object,
 )
-from tests import SAMPLE_ROOT, get_data_from_url
+from tests import RESOURCE_ROOT, SAMPLE_ROOT, get_data_from_url
 
 PDFATTACH_BINARY = shutil.which("pdfattach")
 
@@ -780,3 +783,337 @@ def test_embedded_file__order() -> None:
         "test.txt", attachment4.pdf_object.indirect_reference,
         "xyz.txt", attachment3.pdf_object.indirect_reference,
     ]
+
+
+def _roundtrip(writer: PdfWriter) -> PdfReader:
+    buffer = BytesIO()
+    writer.write(buffer)
+    return PdfReader(BytesIO(buffer.getvalue()))
+
+
+def test_embedded_file__same_name_different_content_is_stable() -> None:
+    # Two actual files sharing one name must both survive enumeration and be
+    # distinguishable through their content digests.
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    first = writer.add_attachment("same.txt", b"first content")
+    second = writer.add_attachment("same.txt", b"second content")
+
+    reader = _roundtrip(writer)
+    entries = list(reader.attachment_list)
+    assert len(entries) == 2
+    assert [entry.name for entry in entries] == ["same.txt", "same.txt"]
+    assert [entry.content for entry in entries] == [b"first content", b"second content"]
+
+    digests = {entry.sha256 for entry in entries}
+    assert digests == {
+        hashlib.sha256(b"first content").hexdigest(),
+        hashlib.sha256(b"second content").hexdigest(),
+    }
+    for entry in entries:
+        assert entry.md5 == hashlib.md5(entry.content).hexdigest()
+        assert entry.content_digest("sha1") == hashlib.sha1(entry.content).hexdigest()
+
+    # The legacy name-based lookup keeps every payload, in name tree order.
+    assert reader.attachments["same.txt"] == [b"first content", b"second content"]
+    # The underlying objects remain independently addressable.
+    assert first.pdf_object is not second.pdf_object
+
+
+def test_embedded_file__name_tree_sources() -> None:
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    writer.add_attachment("test.txt", b"content")
+
+    reader = _roundtrip(writer)
+    entry = next(iter(reader.attachment_list))
+    assert len(entry.sources) == 1
+    source = entry.sources[0]
+    assert source.kind == AttachmentSource.NAME_TREE
+    assert source.location == "/Names/EmbeddedFiles/Names[0]"
+    assert source.name == "test.txt"
+    assert repr(source) == (
+        "AttachmentSource(kind='name_tree', "
+        "location='/Names/EmbeddedFiles/Names[0]', name='test.txt')"
+    )
+
+
+def test_embedded_file__uf_differs_from_tree_key() -> None:
+    # The name tree key stays the primary name; /UF is the alternative name.
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    attachment = writer.add_attachment("tree-name.txt", b"content")
+    attachment.pdf_object[NameObject("/UF")] = create_string_object("unicode-name.txt")
+
+    reader = _roundtrip(writer)
+    entry = next(iter(reader.attachment_list))
+    assert entry.name == "tree-name.txt"
+    assert entry.alternative_name == "unicode-name.txt"
+    assert entry.sources[0].name == "tree-name.txt"
+    # Both names resolve through the legacy mapping.
+    assert set(reader.attachments) == {"tree-name.txt", "unicode-name.txt"}
+
+
+def test_embedded_file__same_object_merged_across_references() -> None:
+    # One file specification object reachable from the name tree, the catalog
+    # /AF array and a page /AF array is reported once with three sources.
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    attachment = writer.add_attachment("shared.txt", b"shared payload")
+    reference = attachment.pdf_object.indirect_reference
+    writer.root_object[NameObject("/AF")] = ArrayObject([reference])
+    writer.pages[0][NameObject("/AF")] = ArrayObject([reference])
+
+    reader = _roundtrip(writer)
+    entries = list(reader.attachment_list)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.content == b"shared payload"
+    locations = {source.location: source.kind for source in entry.sources}
+    assert locations == {
+        "/Names/EmbeddedFiles/Names[0]": AttachmentSource.NAME_TREE,
+        "/AF[0]": AttachmentSource.ASSOCIATED_FILE,
+        "/Pages[0]/AF[0]": AttachmentSource.ASSOCIATED_FILE,
+    }
+    # Each name-based lookup still returns the single shared payload.
+    assert reader.attachments["shared.txt"] == [b"shared payload"]
+
+
+def test_embedded_file__catalog_associated_file_without_name_tree() -> None:
+    # An /AF-only file must not be invisible just because it has no name tree key.
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    attachment = writer.add_attachment("af-only.txt", b"associated payload")
+    reference = attachment.pdf_object.indirect_reference
+    del writer.root_object["/Names"]["/EmbeddedFiles"]["/Names"][:]
+    writer.root_object[NameObject("/AF")] = ArrayObject([reference])
+
+    reader = _roundtrip(writer)
+    # The name-tree-only helper keeps its historical, narrower scope.
+    assert list(EmbeddedFile._load(reader.root_object)) == []
+
+    entries = list(reader.attachment_list)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.name == "af-only.txt"
+    assert entry.sources == (
+        AttachmentSource(
+            kind=AttachmentSource.ASSOCIATED_FILE,
+            location="/AF[0]",
+            name="af-only.txt",
+        ),
+    )
+    assert reader.attachments["af-only.txt"] == [b"associated payload"]
+
+
+def test_embedded_file__file_attachment_annotation() -> None:
+    # resources/attachment.pdf only references its embedded file through an
+    # annotation /FS entry, which the old enumeration missed completely.
+    reader = PdfReader(RESOURCE_ROOT / "attachment.pdf")
+    assert list(EmbeddedFile._load(reader.root_object)) == []
+
+    entries = list(reader.attachment_list)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.name == "jpeg.pdf"
+    assert entry.sources == (
+        AttachmentSource(
+            kind=AttachmentSource.ASSOCIATED_FILE,
+            location="/Pages[0]/Annots[0]/FS",
+            name="jpeg.pdf",
+        ),
+    )
+    assert len(entry.content) == 100898
+    assert "jpeg.pdf" in reader.attachments
+
+
+def test_embedded_file__associated_file_malformed_entries() -> None:
+    catalogs = [
+        DictionaryObject({NameObject("/AF"): NumberObject(1)}),
+        DictionaryObject({NameObject("/AF"): ArrayObject([NumberObject(7)])}),
+        DictionaryObject({NameObject("/AF"): ArrayObject([NullObject()])}),
+    ]
+    for catalog in catalogs:
+        writer = PdfWriter()
+        writer._root_object = catalog
+        assert list(EmbeddedFile._load_all(writer)) == []
+
+    writer = PdfWriter()
+    writer._root_object = catalogs[0]
+    with pytest.raises(PdfReadError, match="is not an array"):
+        list(EmbeddedFile._load_all(writer, strict=True))
+
+    writer = PdfWriter()
+    writer._root_object = catalogs[1]
+    with pytest.raises(PdfReadError, match="is not a dictionary"):
+        list(EmbeddedFile._load_all(writer, strict=True))
+
+
+def test_embedded_file__missing_ef_is_enumerated_lazily() -> None:
+    # A file specification without an /EF stream still appears in the list;
+    # the damage surfaces only when its content is requested.
+    file_specification = DictionaryObject(
+        {NameObject("/F"): TextStringObject("no-ef.bin")}
+    )
+    writer = PdfWriter()
+    writer._root_object = DictionaryObject(
+        {NameObject("/AF"): ArrayObject([file_specification])}
+    )
+
+    entries = list(EmbeddedFile._load_all(writer))
+    assert len(entries) == 1
+    assert entries[0].name == "no-ef.bin"
+    with pytest.raises(PdfReadError, match="/EF entry not found"):
+        _ = entries[0].content
+    with pytest.raises(PdfReadError, match="/EF entry not found"):
+        _ = entries[0].sha256
+
+
+def test_embedded_file__nested_kids_source_location() -> None:
+    file_specification = DictionaryObject(
+        {NameObject("/F"): TextStringObject("nested.txt")}
+    )
+    inner = DictionaryObject(
+        {NameObject("/Names"): ArrayObject([TextStringObject("nested.txt"), file_specification])}
+    )
+    outer = DictionaryObject({NameObject("/Kids"): ArrayObject([inner])})
+    catalog = DictionaryObject(
+        {NameObject("/Names"): DictionaryObject(
+            {NameObject("/EmbeddedFiles"): outer}
+        )}
+    )
+    writer = PdfWriter()
+    writer._root_object = catalog
+
+    entries = list(EmbeddedFile._load_all(writer))
+    assert len(entries) == 1
+    assert entries[0].sources[0].location == "/Names/EmbeddedFiles/Kids[0]/Names[0]"
+
+
+def test_embedded_file__cyclic_name_tree_does_not_hang() -> None:
+    cyclic = DictionaryObject()
+    cyclic[NameObject("/Kids")] = ArrayObject([cyclic])
+    catalog = DictionaryObject(
+        {NameObject("/Names"): DictionaryObject(
+            {NameObject("/EmbeddedFiles"): cyclic}
+        )}
+    )
+    writer = PdfWriter()
+    writer._root_object = catalog
+
+    assert list(EmbeddedFile._load_all(writer)) == []
+    with pytest.raises(PdfReadError, match="cycle"):
+        list(EmbeddedFile._load_all(writer, strict=True))
+
+
+def test_embedded_file__odd_name_list() -> None:
+    catalog = DictionaryObject(
+        {NameObject("/Names"): DictionaryObject(
+            {NameObject("/EmbeddedFiles"): DictionaryObject(
+                {NameObject("/Names"): ArrayObject([TextStringObject("lonely.txt")])}
+            )}
+        )}
+    )
+    writer = PdfWriter()
+    writer._root_object = catalog
+    assert list(EmbeddedFile._load_all(writer)) == []
+    with pytest.raises(PdfReadError, match="odd number of elements"):
+        list(EmbeddedFile._load_all(writer, strict=True))
+
+
+def test_embedded_file__annotation_associated_files() -> None:
+    # An annotation can carry associated files itself through /AF.
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    file_specification = DictionaryObject(
+        {NameObject("/F"): TextStringObject("ann-af.bin")}
+    )
+    annotation = DictionaryObject(
+        {
+            NameObject("/Subtype"): NameObject("/Stamp"),
+            NameObject("/AF"): ArrayObject([writer._add_object(file_specification)]),
+        }
+    )
+    writer.pages[0][NameObject("/Annots")] = ArrayObject(
+        [writer._add_object(annotation)]
+    )
+
+    reader = _roundtrip(writer)
+    entries = list(reader.attachment_list)
+    assert len(entries) == 1
+    assert entries[0].sources == (
+        AttachmentSource(
+            kind=AttachmentSource.ASSOCIATED_FILE,
+            location="/Pages[0]/Annots[0]/AF[0]",
+            name="ann-af.bin",
+        ),
+    )
+
+
+def test_embedded_file__non_string_name_entries() -> None:
+    # Non-string /F entries must not break enumeration or the name mapping.
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    stream = DecodedStreamObject()
+    stream.set_data(b"two")
+    stream[NameObject("/Type")] = NameObject("/EmbeddedFile")
+    file_specification = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Filespec"),
+            NameObject("/F"): NumberObject(7),
+            NameObject("/EF"): DictionaryObject(
+                {NameObject("/F"): writer._add_object(stream)}
+            ),
+        }
+    )
+    writer.root_object[NameObject("/AF")] = ArrayObject(
+        [writer._add_object(file_specification)]
+    )
+
+    reader = _roundtrip(writer)
+    entries = list(reader.attachment_list)
+    assert len(entries) == 1
+    assert entries[0].name == ""
+    assert entries[0].sources[0].name is None
+    # A file without any usable name is simply absent from the name mapping.
+    assert dict(reader.attachments) == {}
+    assert entries[0].content == b"two"
+
+
+def test_embedded_file__sources_of_writer_attachments() -> None:
+    # The writer benefits from the same enumeration as the reader.
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    writer.add_attachment("a.txt", b"a")
+    writer.add_attachment("b.txt", b"b")
+
+    entries = list(writer.attachment_list)
+    assert [entry.name for entry in entries] == ["a.txt", "b.txt"]
+    assert [entry.sources[0].location for entry in entries] == [
+        "/Names/EmbeddedFiles/Names[0]",
+        "/Names/EmbeddedFiles/Names[2]",
+    ]
+
+
+def test_embedded_file__same_object_under_two_name_tree_keys() -> None:
+    # One object registered twice in the name tree is enumerated once while
+    # both keys remain visible in the sources and the legacy name mapping.
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    attachment = writer.add_attachment("first.txt", b"data")
+    names = writer.root_object["/Names"]["/EmbeddedFiles"]["/Names"]
+    names.append(TextStringObject("second.txt"))
+    names.append(attachment.pdf_object.indirect_reference)
+
+    reader = _roundtrip(writer)
+    entries = list(reader.attachment_list)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.name == "first.txt"
+    assert [source.name for source in entry.sources] == ["first.txt", "second.txt"]
+    assert [source.location for source in entry.sources] == [
+        "/Names/EmbeddedFiles/Names[0]",
+        "/Names/EmbeddedFiles/Names[2]",
+    ]
+    assert set(reader.attachments) == {"first.txt", "second.txt"}
+    assert reader.attachments["second.txt"] == [b"data"]

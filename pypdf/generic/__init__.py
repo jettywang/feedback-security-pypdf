@@ -55,7 +55,7 @@ from ._data_structures import (
     TreeObject,
     read_object,
 )
-from ._files import EmbeddedFile
+from ._files import AttachmentSource, EmbeddedFile
 from ._fit import Fit
 from ._link import DirectReferenceLink, NamedReferenceLink, ReferenceLink, extract_links
 from ._outline import OutlineItem
@@ -76,6 +76,7 @@ PAGE_FIT: Fit = Fit.fit()
 __all__ = [
     "PAGE_FIT",
     "ArrayObject",
+    "AttachmentSource",
     "BooleanObject",
     "ByteStringObject",
     "ContentStream",

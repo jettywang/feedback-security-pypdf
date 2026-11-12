@@ -1725,12 +1725,26 @@ class PdfDocCommon(ABC):
 
     @property
     def attachments(self) -> Mapping[str, list[bytes]]:
-        """Mapping of attachment filenames to their content."""
+        """
+        Mapping of attachment filenames to their content.
+
+        An attachment is indexed under every name under which it is referenced:
+        its name tree key(s), its alternative (``/UF``/``/F``) name, and the
+        names of its associated files references. Several actual files sharing
+        a name are all preserved, in enumeration order, so no payload is hidden
+        by a duplicate name.
+        """
         entries: dict[str, list[EmbeddedFile]] = {}
 
         for entry in self.attachment_list:
-            for name in entry._names:
-                entries.setdefault(name, []).append(entry)
+            names = list(entry._names)
+            for source in entry.sources:
+                if source.name is not None and source.name not in names:
+                    names.append(source.name)
+            for name in names:
+                # An empty name cannot address an entry through the mapping.
+                if name:
+                    entries.setdefault(name, []).append(entry)
 
         return LazyDict(
             {
@@ -1745,8 +1759,19 @@ class PdfDocCommon(ABC):
 
     @property
     def attachment_list(self) -> Iterator[EmbeddedFile]:
-        """Iterable of attachment objects."""
-        yield from EmbeddedFile._load(self.root_object, strict=self.strict)
+        """
+        Iterable of every embedded file reachable from the document.
+
+        This covers both the embedded files name tree
+        (``/Names/EmbeddedFiles``) and the associated files (``/AF``) of the
+        catalog, the pages and their annotations, including file attachment
+        annotations. Each embedded file is reported exactly once, even when it
+        is referenced from several places; use
+        :attr:`~pypdf.generic.EmbeddedFile.sources` to inspect every reference
+        and :meth:`~pypdf.generic.EmbeddedFile.content_digest` to compare the
+        content of files sharing a name.
+        """
+        yield from EmbeddedFile._load_all(self, strict=self.strict)
 
     @abstractmethod
     def _repr_mimebundle_(

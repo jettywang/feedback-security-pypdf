@@ -27,6 +27,7 @@ from pypdf.errors import (
 from pypdf.filters import FlateDecode
 from pypdf.generic import (
     ArrayObject,
+    AttachmentSource,
     Destination,
     DictionaryObject,
     IndirectObject,
@@ -221,6 +222,28 @@ def test_get_attachments(src, nb_attachments):
                     fileobj = annotobj["/FS"]
                     attachments[fileobj["/F"]] = fileobj["/EF"]["/F"].get_data()
     assert len(attachments) == nb_attachments
+
+
+def test_attachment_list_finds_annotation_embedded_file():
+    # The embedded file of attachment.pdf is only reachable through a file
+    # attachment annotation, so attachment_list must discover it and report the
+    # annotation as its source.
+    reader = PdfReader(RESOURCE_ROOT / "attachment.pdf")
+
+    entries = list(reader.attachment_list)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.name == "jpeg.pdf"
+    assert entry.sources == (
+        AttachmentSource(
+            kind="associated_file",
+            location="/Pages[0]/Annots[0]/FS",
+            name="jpeg.pdf",
+        ),
+    )
+    # The legacy name-based mapping remains available and returns the payload.
+    assert list(reader.attachments) == ["jpeg.pdf"]
+    assert reader.attachments["jpeg.pdf"] == [entry.content]
 
 
 @pytest.mark.parametrize(

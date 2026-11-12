@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## Unreleased
+
+### New Features (ENH)
+- Enumerate every embedded file through `attachment_list`, including associated files (`/AF`) and file attachment annotations; expose per-file reference sources (`EmbeddedFile.sources`, `AttachmentSource`) and content digests (`EmbeddedFile.sha256`, `EmbeddedFile.md5`, `EmbeddedFile.content_digest()`) so same-name files stay distinguishable
+
+### Bug Fixes (BUG)
+- Keep duplicate name-tree entries and multiple references to the same embedded file visible instead of collapsing them onto a single name
+
 ## Version 7.0.1, 2026-11-10
 
 ### Security (SEC)

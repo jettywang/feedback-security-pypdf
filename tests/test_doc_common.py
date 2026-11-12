@@ -129,12 +129,14 @@ def test_get_attachments__list_queried_only_once_per_result():
     for index in range(5):
         writer.add_attachment(f"test{index}.txt", f"content{index}")
 
-    original_load = EmbeddedFile._load
-    with mock.patch("pypdf.generic._files.EmbeddedFile._load", side_effect=original_load) as load_mock:
+    original_load = EmbeddedFile._load_all
+    with mock.patch(
+        "pypdf.generic._files.EmbeddedFile._load_all", side_effect=original_load
+    ) as load_mock:
         for index, (name, content) in enumerate(writer.attachments.items()):
             assert name == f"test{index}.txt"
             assert content == [f"content{index}".encode()]
-    load_mock.assert_called_once_with(writer.root_object, strict=False)
+    load_mock.assert_called_once_with(writer, strict=False)
 
 
 @pytest.mark.enable_socket
