@@ -1,0 +1,536 @@
+[
+  {
+    "sample": "all-rc4",
+    "declared": {
+      "StmF": "/V2",
+      "StrF": "/V2",
+      "EFF": "/V2",
+      "encrypt_methods": {
+        "StmF": "/V2",
+        "StrF": "/V2",
+        "EFF": "/V2"
+      }
+    },
+    "selection": {
+      "stm_crypt": "CryptRC4(/V2)",
+      "str_crypt": "CryptRC4(/V2)",
+      "ef_crypt": "CryptRC4(/V2)"
+    },
+    "authenticated": true,
+    "raised": null,
+    "objects": [
+      {
+        "object": "page content stream",
+        "idnum": 4,
+        "routed_by_spec": "StmF",
+        "declared_method": "/V2",
+        "expected": "zlib(PAGE_TEXT)",
+        "status": "correct",
+        "detail": "decompressed bytes match plaintext",
+        "observed_hex_prefix": "789c730a51d077335430b450084953303752303730500849",
+        "observed_len": 63
+      },
+      {
+        "object": "Info /Title string",
+        "idnum": 10,
+        "routed_by_spec": "StrF",
+        "declared_method": "/V2",
+        "expected": "Document title (StrF string)",
+        "status": "correct",
+        "detail": "text round-trips",
+        "observed_hex_prefix": "446f63756d656e74207469746c6520285374724620737472",
+        "observed_len": 28
+      },
+      {
+        "object": "plain embedded file (no compression)",
+        "idnum": 7,
+        "routed_by_spec": "EFF",
+        "declared_method": "/V2",
+        "expected": "plaintext",
+        "status": "correct",
+        "detail": "raw bytes match plaintext",
+        "observed_hex_prefix": "504c41494e2d4154544143484d454e543a20746869732065",
+        "observed_len": 256
+      },
+      {
+        "object": "flate embedded file",
+        "idnum": 8,
+        "routed_by_spec": "EFF",
+        "declared_method": "/V2",
+        "expected": "zlib(plaintext)",
+        "status": "correct",
+        "detail": "decompressed bytes match plaintext",
+        "observed_hex_prefix": "789c73f3710c71d5750c097174f6f075f50bb152a8cac94c",
+        "observed_len": 70
+      }
+    ]
+  },
+  {
+    "sample": "all-aes",
+    "declared": {
+      "StmF": "/AESV2",
+      "StrF": "/AESV2",
+      "EFF": "/AESV2",
+      "encrypt_methods": {
+        "StmF": "/AESV2",
+        "StrF": "/AESV2",
+        "EFF": "/AESV2"
+      }
+    },
+    "selection": {
+      "stm_crypt": "CryptAES",
+      "str_crypt": "CryptAES",
+      "ef_crypt": "CryptAES"
+    },
+    "authenticated": true,
+    "raised": null,
+    "objects": [
+      {
+        "object": "page content stream",
+        "idnum": 4,
+        "routed_by_spec": "StmF",
+        "declared_method": "/AESV2",
+        "expected": "zlib(PAGE_TEXT)",
+        "status": "correct",
+        "detail": "decompressed bytes match plaintext",
+        "observed_hex_prefix": "789c730a51d077335430b450084953303752303730500849",
+        "observed_len": 63
+      },
+      {
+        "object": "Info /Title string",
+        "idnum": 10,
+        "routed_by_spec": "StrF",
+        "declared_method": "/AESV2",
+        "expected": "Document title (StrF string)",
+        "status": "correct",
+        "detail": "text round-trips",
+        "observed_hex_prefix": "446f63756d656e74207469746c6520285374724620737472",
+        "observed_len": 28
+      },
+      {
+        "object": "plain embedded file (no compression)",
+        "idnum": 7,
+        "routed_by_spec": "EFF",
+        "declared_method": "/AESV2",
+        "expected": "plaintext",
+        "status": "correct",
+        "detail": "raw bytes match plaintext",
+        "observed_hex_prefix": "504c41494e2d4154544143484d454e543a20746869732065",
+        "observed_len": 256
+      },
+      {
+        "object": "flate embedded file",
+        "idnum": 8,
+        "routed_by_spec": "EFF",
+        "declared_method": "/AESV2",
+        "expected": "zlib(plaintext)",
+        "status": "correct",
+        "detail": "decompressed bytes match plaintext",
+        "observed_hex_prefix": "789c73f3710c71d5750c097174f6f075f50bb152a8cac94c",
+        "observed_len": 70
+      }
+    ]
+  },
+  {
+    "sample": "all-identity",
+    "declared": {
+      "StmF": "/Identity",
+      "StrF": "/Identity",
+      "EFF": "/Identity",
+      "encrypt_methods": {
+        "StmF": "/Identity",
+        "StrF": "/Identity",
+        "EFF": "/Identity"
+      }
+    },
+    "selection": {
+      "stm_crypt": "CryptIdentity(/Identity)",
+      "str_crypt": "CryptIdentity(/Identity)",
+      "ef_crypt": "CryptIdentity(/Identity)"
+    },
+    "authenticated": true,
+    "raised": null,
+    "objects": [
+      {
+        "object": "page content stream",
+        "idnum": 4,
+        "routed_by_spec": "StmF",
+        "declared_method": "/Identity",
+        "expected": "zlib(PAGE_TEXT)",
+        "status": "correct",
+        "detail": "decompressed bytes match plaintext",
+        "observed_hex_prefix": "789c730a51d077335430b450084953303752303730500849",
+        "observed_len": 63
+      },
+      {
+        "object": "Info /Title string",
+        "idnum": 10,
+        "routed_by_spec": "StrF",
+        "declared_method": "/Identity",
+        "expected": "Document title (StrF string)",
+        "status": "correct",
+        "detail": "text round-trips",
+        "observed_hex_prefix": "446f63756d656e74207469746c6520285374724620737472",
+        "observed_len": 28
+      },
+      {
+        "object": "plain embedded file (no compression)",
+        "idnum": 7,
+        "routed_by_spec": "EFF",
+        "declared_method": "/Identity",
+        "expected": "plaintext",
+        "status": "correct",
+        "detail": "raw bytes match plaintext",
+        "observed_hex_prefix": "504c41494e2d4154544143484d454e543a20746869732065",
+        "observed_len": 256
+      },
+      {
+        "object": "flate embedded file",
+        "idnum": 8,
+        "routed_by_spec": "EFF",
+        "declared_method": "/Identity",
+        "expected": "zlib(plaintext)",
+        "status": "correct",
+        "detail": "decompressed bytes match plaintext",
+        "observed_hex_prefix": "789c73f3710c71d5750c097174f6f075f50bb152a8cac94c",
+        "observed_len": 70
+      }
+    ]
+  },
+  {
+    "sample": "stm-identity-str-rc4",
+    "declared": {
+      "StmF": "/Identity",
+      "StrF": "/V2",
+      "EFF": "/V2",
+      "encrypt_methods": {
+        "StmF": "/Identity",
+        "StrF": "/V2",
+        "EFF": "/V2"
+      }
+    },
+    "selection": {
+      "stm_crypt": "CryptIdentity(/Identity)",
+      "str_crypt": "CryptRC4(/V2)",
+      "ef_crypt": "CryptRC4(/V2)"
+    },
+    "authenticated": true,
+    "raised": null,
+    "objects": [
+      {
+        "object": "page content stream",
+        "idnum": 4,
+        "routed_by_spec": "StmF",
+        "declared_method": "/Identity",
+        "expected": "zlib(PAGE_TEXT)",
+        "status": "correct",
+        "detail": "decompressed bytes match plaintext",
+        "observed_hex_prefix": "789c730a51d077335430b450084953303752303730500849",
+        "observed_len": 63
+      },
+      {
+        "object": "Info /Title string",
+        "idnum": 10,
+        "routed_by_spec": "StrF",
+        "declared_method": "/V2",
+        "expected": "Document title (StrF string)",
+        "status": "correct",
+        "detail": "text round-trips",
+        "observed_hex_prefix": "446f63756d656e74207469746c6520285374724620737472",
+        "observed_len": 28
+      },
+      {
+        "object": "plain embedded file (no compression)",
+        "idnum": 7,
+        "routed_by_spec": "EFF",
+        "declared_method": "/V2",
+        "expected": "plaintext",
+        "status": "misdecrypted",
+        "detail": "raw bytes differ (wrong crypt filter/key)",
+        "observed_hex_prefix": "55041848aec932cf03aa6aa0fa3fdfc9e63f1f7316730497",
+        "observed_len": 256
+      },
+      {
+        "object": "flate embedded file",
+        "idnum": 8,
+        "routed_by_spec": "EFF",
+        "declared_method": "/V2",
+        "expected": "zlib(plaintext)",
+        "status": "misdecrypted",
+        "detail": "zlib error after decrypt: Error -3 while decompressing data: incorrect header check",
+        "observed_hex_prefix": "8068ce820b48bc4ae3b99b10b97683f5f3458be96d979b63",
+        "observed_len": 70
+      }
+    ]
+  },
+  {
+    "sample": "stm-aes-str-rc4",
+    "declared": {
+      "StmF": "/AESV2",
+      "StrF": "/V2",
+      "EFF": "/V2",
+      "encrypt_methods": {
+        "StmF": "/AESV2",
+        "StrF": "/V2",
+        "EFF": "/V2"
+      }
+    },
+    "selection": {
+      "stm_crypt": "CryptAES",
+      "str_crypt": "CryptRC4(/V2)",
+      "ef_crypt": "CryptRC4(/V2)"
+    },
+    "authenticated": true,
+    "raised": null,
+    "objects": [
+      {
+        "object": "page content stream",
+        "idnum": 4,
+        "routed_by_spec": "StmF",
+        "declared_method": "/AESV2",
+        "expected": "zlib(PAGE_TEXT)",
+        "status": "correct",
+        "detail": "decompressed bytes match plaintext",
+        "observed_hex_prefix": "789c730a51d077335430b450084953303752303730500849",
+        "observed_len": 63
+      },
+      {
+        "object": "Info /Title string",
+        "idnum": 10,
+        "routed_by_spec": "StrF",
+        "declared_method": "/V2",
+        "expected": "Document title (StrF string)",
+        "status": "correct",
+        "detail": "text round-trips",
+        "observed_hex_prefix": "446f63756d656e74207469746c6520285374724620737472",
+        "observed_len": 28
+      },
+      {
+        "object": "plain embedded file (no compression)",
+        "idnum": 7,
+        "routed_by_spec": "EFF",
+        "declared_method": "/V2",
+        "expected": "plaintext",
+        "status": "misdecrypted",
+        "detail": "raw bytes differ (wrong crypt filter/key)",
+        "observed_hex_prefix": "5cb672fe49814f35527b2034cf5690499b235eceb5489eff",
+        "observed_len": 97
+      },
+      {
+        "object": "flate embedded file",
+        "idnum": 8,
+        "routed_by_spec": "EFF",
+        "declared_method": "/V2",
+        "expected": "zlib(plaintext)",
+        "status": "misdecrypted",
+        "detail": "zlib error after decrypt: Error -3 while decompressing data: incorrect header check",
+        "observed_hex_prefix": "08b3b41a269f749724cad5f1810b45a0ed24153a15ae06dc",
+        "observed_len": 59
+      }
+    ]
+  },
+  {
+    "sample": "eff-aes-mismatch",
+    "declared": {
+      "StmF": "/V2",
+      "StrF": "/V2",
+      "EFF": "/AESV2",
+      "encrypt_methods": {
+        "StmF": "/V2",
+        "StrF": "/V2",
+        "EFF": "/AESV2"
+      }
+    },
+    "selection": {
+      "stm_crypt": "CryptRC4(/V2)",
+      "str_crypt": "CryptRC4(/V2)",
+      "ef_crypt": "CryptAES"
+    },
+    "authenticated": true,
+    "raised": null,
+    "objects": [
+      {
+        "object": "page content stream",
+        "idnum": 4,
+        "routed_by_spec": "StmF",
+        "declared_method": "/V2",
+        "expected": "zlib(PAGE_TEXT)",
+        "status": "correct",
+        "detail": "decompressed bytes match plaintext",
+        "observed_hex_prefix": "789c730a51d077335430b450084953303752303730500849",
+        "observed_len": 63
+      },
+      {
+        "object": "Info /Title string",
+        "idnum": 10,
+        "routed_by_spec": "StrF",
+        "declared_method": "/V2",
+        "expected": "Document title (StrF string)",
+        "status": "correct",
+        "detail": "text round-trips",
+        "observed_hex_prefix": "446f63756d656e74207469746c6520285374724620737472",
+        "observed_len": 28
+      },
+      {
+        "object": "plain embedded file (no compression)",
+        "idnum": 7,
+        "routed_by_spec": "EFF",
+        "declared_method": "/AESV2",
+        "expected": "plaintext",
+        "status": "misdecrypted",
+        "detail": "raw bytes differ (wrong crypt filter/key)",
+        "observed_hex_prefix": "b8f9ba1d5b8469fc0a3fafa7948c826a71de29b601bae587",
+        "observed_len": 288
+      },
+      {
+        "object": "flate embedded file",
+        "idnum": 8,
+        "routed_by_spec": "EFF",
+        "declared_method": "/AESV2",
+        "expected": "zlib(plaintext)",
+        "status": "misdecrypted",
+        "detail": "zlib error after decrypt: Error -3 while decompressing data: incorrect header check",
+        "observed_hex_prefix": "3d97c03eb8a1dc287f6f5713976a47e83cd05ee2f5443bb0",
+        "observed_len": 96
+      }
+    ]
+  },
+  {
+    "sample": "eff-identity-mismatch",
+    "declared": {
+      "StmF": "/V2",
+      "StrF": "/V2",
+      "EFF": "/Identity",
+      "encrypt_methods": {
+        "StmF": "/V2",
+        "StrF": "/V2",
+        "EFF": "/Identity"
+      }
+    },
+    "selection": {
+      "stm_crypt": "CryptRC4(/V2)",
+      "str_crypt": "CryptRC4(/V2)",
+      "ef_crypt": "CryptIdentity(/Identity)"
+    },
+    "authenticated": true,
+    "raised": null,
+    "objects": [
+      {
+        "object": "page content stream",
+        "idnum": 4,
+        "routed_by_spec": "StmF",
+        "declared_method": "/V2",
+        "expected": "zlib(PAGE_TEXT)",
+        "status": "correct",
+        "detail": "decompressed bytes match plaintext",
+        "observed_hex_prefix": "789c730a51d077335430b450084953303752303730500849",
+        "observed_len": 63
+      },
+      {
+        "object": "Info /Title string",
+        "idnum": 10,
+        "routed_by_spec": "StrF",
+        "declared_method": "/V2",
+        "expected": "Document title (StrF string)",
+        "status": "correct",
+        "detail": "text round-trips",
+        "observed_hex_prefix": "446f63756d656e74207469746c6520285374724620737472",
+        "observed_len": 28
+      },
+      {
+        "object": "plain embedded file (no compression)",
+        "idnum": 7,
+        "routed_by_spec": "EFF",
+        "declared_method": "/Identity",
+        "expected": "plaintext",
+        "status": "misdecrypted",
+        "detail": "raw bytes differ (wrong crypt filter/key)",
+        "observed_hex_prefix": "55041848aec932cf03aa6aa0fa3fdfc9e63f1f7316730497",
+        "observed_len": 256
+      },
+      {
+        "object": "flate embedded file",
+        "idnum": 8,
+        "routed_by_spec": "EFF",
+        "declared_method": "/Identity",
+        "expected": "zlib(plaintext)",
+        "status": "misdecrypted",
+        "detail": "zlib error after decrypt: Error -3 while decompressing data: incorrect header check",
+        "observed_hex_prefix": "8068ce820b48bc4ae3b99b10b97683f5f3458be96d979b63",
+        "observed_len": 70
+      }
+    ]
+  },
+  {
+    "sample": "unknown-stmf",
+    "declared": {
+      "StmF": "/Bogus",
+      "StrF": "/V2",
+      "EFF": "/V2",
+      "encrypt_methods": {
+        "StmF": "/V2",
+        "StrF": "/V2",
+        "EFF": "/V2"
+      }
+    },
+    "selection": {
+      "stm_crypt": "",
+      "str_crypt": "",
+      "ef_crypt": ""
+    },
+    "authenticated": false,
+    "raised": {
+      "type": "NotImplementedError",
+      "message": "StmF Method /Bogus NOT supported!"
+    },
+    "objects": []
+  },
+  {
+    "sample": "unknown-eff",
+    "declared": {
+      "StmF": "/V2",
+      "StrF": "/V2",
+      "EFF": "/Bogus",
+      "encrypt_methods": {
+        "StmF": "/V2",
+        "StrF": "/V2",
+        "EFF": "/V2"
+      }
+    },
+    "selection": {
+      "stm_crypt": "",
+      "str_crypt": "",
+      "ef_crypt": ""
+    },
+    "authenticated": false,
+    "raised": {
+      "type": "NotImplementedError",
+      "message": "EFF Method /Bogus NOT supported!"
+    },
+    "objects": []
+  },
+  {
+    "sample": "none-strf",
+    "declared": {
+      "StmF": "/V2",
+      "StrF": "/None",
+      "EFF": "/V2",
+      "encrypt_methods": {
+        "StmF": "/V2",
+        "StrF": "/V2",
+        "EFF": "/V2"
+      }
+    },
+    "selection": {
+      "stm_crypt": "",
+      "str_crypt": "",
+      "ef_crypt": ""
+    },
+    "authenticated": false,
+    "raised": {
+      "type": "NotImplementedError",
+      "message": "StrF Method /None NOT supported!"
+    },
+    "objects": []
+  }
+]

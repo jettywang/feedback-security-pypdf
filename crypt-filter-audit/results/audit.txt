@@ -1,0 +1,61 @@
+========================================================================================
+sample=all-rc4.pdf  declared StmF=/V2 StrF=/V2 EFF=/V2
+  pypdf instantiated -> stm_crypt=CryptRC4(/V2)  str_crypt=CryptRC4(/V2)  ef_crypt=CryptRC4(/V2)
+   [correct      ] page content stream              obj=4   spec=StmF declared=/V2       len=63   decompressed bytes match plaintext
+   [correct      ] Info /Title string               obj=10  spec=StrF declared=/V2       len=28   text round-trips
+   [correct      ] plain embedded file (no compression) obj=7   spec=EFF declared=/V2       len=256  raw bytes match plaintext
+   [correct      ] flate embedded file              obj=8   spec=EFF declared=/V2       len=70   decompressed bytes match plaintext
+========================================================================================
+sample=all-aes.pdf  declared StmF=/AESV2 StrF=/AESV2 EFF=/AESV2
+  pypdf instantiated -> stm_crypt=CryptAES  str_crypt=CryptAES  ef_crypt=CryptAES
+   [correct      ] page content stream              obj=4   spec=StmF declared=/AESV2    len=63   decompressed bytes match plaintext
+   [correct      ] Info /Title string               obj=10  spec=StrF declared=/AESV2    len=28   text round-trips
+   [correct      ] plain embedded file (no compression) obj=7   spec=EFF declared=/AESV2    len=256  raw bytes match plaintext
+   [correct      ] flate embedded file              obj=8   spec=EFF declared=/AESV2    len=70   decompressed bytes match plaintext
+========================================================================================
+sample=all-identity.pdf  declared StmF=/Identity StrF=/Identity EFF=/Identity
+  pypdf instantiated -> stm_crypt=CryptIdentity(/Identity)  str_crypt=CryptIdentity(/Identity)  ef_crypt=CryptIdentity(/Identity)
+   [correct      ] page content stream              obj=4   spec=StmF declared=/Identity len=63   decompressed bytes match plaintext
+   [correct      ] Info /Title string               obj=10  spec=StrF declared=/Identity len=28   text round-trips
+   [correct      ] plain embedded file (no compression) obj=7   spec=EFF declared=/Identity len=256  raw bytes match plaintext
+   [correct      ] flate embedded file              obj=8   spec=EFF declared=/Identity len=70   decompressed bytes match plaintext
+========================================================================================
+sample=stm-identity-str-rc4.pdf  declared StmF=/Identity StrF=/V2 EFF=/V2
+  pypdf instantiated -> stm_crypt=CryptIdentity(/Identity)  str_crypt=CryptRC4(/V2)  ef_crypt=CryptRC4(/V2)
+   [correct      ] page content stream              obj=4   spec=StmF declared=/Identity len=63   decompressed bytes match plaintext
+   [correct      ] Info /Title string               obj=10  spec=StrF declared=/V2       len=28   text round-trips
+   [misdecrypted ] plain embedded file (no compression) obj=7   spec=EFF declared=/V2       len=256  raw bytes differ (wrong crypt filter/key)
+   [misdecrypted ] flate embedded file              obj=8   spec=EFF declared=/V2       len=70   zlib error after decrypt: Error -3 while decompressing data: incorrect header check
+========================================================================================
+sample=stm-aes-str-rc4.pdf  declared StmF=/AESV2 StrF=/V2 EFF=/V2
+  pypdf instantiated -> stm_crypt=CryptAES  str_crypt=CryptRC4(/V2)  ef_crypt=CryptRC4(/V2)
+   [correct      ] page content stream              obj=4   spec=StmF declared=/AESV2    len=63   decompressed bytes match plaintext
+   [correct      ] Info /Title string               obj=10  spec=StrF declared=/V2       len=28   text round-trips
+   [misdecrypted ] plain embedded file (no compression) obj=7   spec=EFF declared=/V2       len=97   raw bytes differ (wrong crypt filter/key)
+   [misdecrypted ] flate embedded file              obj=8   spec=EFF declared=/V2       len=59   zlib error after decrypt: Error -3 while decompressing data: incorrect header check
+========================================================================================
+sample=eff-aes-mismatch.pdf  declared StmF=/V2 StrF=/V2 EFF=/AESV2
+  pypdf instantiated -> stm_crypt=CryptRC4(/V2)  str_crypt=CryptRC4(/V2)  ef_crypt=CryptAES
+   [correct      ] page content stream              obj=4   spec=StmF declared=/V2       len=63   decompressed bytes match plaintext
+   [correct      ] Info /Title string               obj=10  spec=StrF declared=/V2       len=28   text round-trips
+   [misdecrypted ] plain embedded file (no compression) obj=7   spec=EFF declared=/AESV2    len=288  raw bytes differ (wrong crypt filter/key)
+   [misdecrypted ] flate embedded file              obj=8   spec=EFF declared=/AESV2    len=96   zlib error after decrypt: Error -3 while decompressing data: incorrect header check
+========================================================================================
+sample=eff-identity-mismatch.pdf  declared StmF=/V2 StrF=/V2 EFF=/Identity
+  pypdf instantiated -> stm_crypt=CryptRC4(/V2)  str_crypt=CryptRC4(/V2)  ef_crypt=CryptIdentity(/Identity)
+   [correct      ] page content stream              obj=4   spec=StmF declared=/V2       len=63   decompressed bytes match plaintext
+   [correct      ] Info /Title string               obj=10  spec=StrF declared=/V2       len=28   text round-trips
+   [misdecrypted ] plain embedded file (no compression) obj=7   spec=EFF declared=/Identity len=256  raw bytes differ (wrong crypt filter/key)
+   [misdecrypted ] flate embedded file              obj=8   spec=EFF declared=/Identity len=70   zlib error after decrypt: Error -3 while decompressing data: incorrect header check
+========================================================================================
+sample=unknown-stmf.pdf  declared StmF=/Bogus StrF=/V2 EFF=/V2
+  RAISED NotImplementedError: StmF Method /Bogus NOT supported!
+  selection at failure -> stm= str= ef=
+========================================================================================
+sample=unknown-eff.pdf  declared StmF=/V2 StrF=/V2 EFF=/Bogus
+  RAISED NotImplementedError: EFF Method /Bogus NOT supported!
+  selection at failure -> stm= str= ef=
+========================================================================================
+sample=none-strf.pdf  declared StmF=/V2 StrF=/None EFF=/V2
+  RAISED NotImplementedError: StrF Method /None NOT supported!
+  selection at failure -> stm= str= ef=
