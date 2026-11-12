@@ -42,10 +42,27 @@ if TYPE_CHECKING:
 class NamedReferenceLink:
     """Named reference link being preserved until we can resolve it correctly."""
 
-    def __init__(self, reference: TextStringObject, source_pdf: "PdfReader") -> None:
-        """reference: TextStringObject with named reference"""
+    def __init__(
+        self,
+        reference: TextStringObject,
+        source_pdf: "PdfReader",
+        container: DictionaryObject | None = None,
+        key: str | None = None,
+    ) -> None:
+        """
+        reference: TextStringObject with named reference
+        container: annotation dictionary holding the reference (optional)
+        key: key of the reference within ``container`` (optional)
+        """
         self._reference = reference
         self._source_pdf = source_pdf
+        self._container = container
+        self._key = key
+
+    def remove_reference(self) -> None:
+        """Remove the destination or action from the containing annotation."""
+        if self._container is not None and self._key is not None:
+            self._container.pop(self._key, None)
 
     def find_referenced_page(self) -> IndirectObject | None:
         destination = self._source_pdf.named_destinations.get(str(self._reference))
@@ -80,9 +97,25 @@ class NamedReferenceLink:
 class DirectReferenceLink:
     """Direct reference link being preserved until we can resolve it correctly."""
 
-    def __init__(self, reference: ArrayObject) -> None:
-        """reference: an ArrayObject whose first element is the Page indirect object"""
+    def __init__(
+        self,
+        reference: ArrayObject,
+        container: DictionaryObject | None = None,
+        key: str | None = None,
+    ) -> None:
+        """
+        reference: an ArrayObject whose first element is the Page indirect object
+        container: annotation dictionary holding the reference (optional)
+        key: key of the reference within ``container`` (optional)
+        """
         self._reference = reference
+        self._container = container
+        self._key = key
+
+    def remove_reference(self) -> None:
+        """Remove the destination or action from the containing annotation."""
+        if self._container is not None and self._key is not None:
+            self._container.pop(self._key, None)
 
     def find_referenced_page(self) -> IndirectObject | None:
         if not self._reference:
@@ -147,23 +180,34 @@ def _build_link(indirect_object: IndirectObject, page: "PageObject") -> Referenc
         return None
 
     if "/A" in link:
-        action = cast(DictionaryObject, link["/A"])
-        if action.get("/S") != "/GoTo":
+        action = cast(DictionaryObject, link["/A"].get_object())
+        if not isinstance(action, DictionaryObject) or action.get("/S") != "/GoTo":
             return None
 
         if "/D" not in action:
             return None
-        return _create_link(action["/D"], src)
+        return _create_link(action["/D"], src, link, "/A")
 
     if "/Dest" in link:
-        return _create_link(link["/Dest"], src)
+        return _create_link(link["/Dest"], src, link, "/Dest")
 
     return None  # Nothing to do here
 
 
-def _create_link(reference: PdfObject, source_pdf: "PdfReader") -> ReferenceLink | None:
+def _create_link(
+    reference: PdfObject,
+    source_pdf: "PdfReader",
+    container: DictionaryObject | None = None,
+    key: str | None = None,
+) -> ReferenceLink | None:
+    if isinstance(reference, IndirectObject):
+        # destinations may be stored in an indirect object
+        resolved = reference.get_object()
+        if resolved is None:
+            return None
+        reference = resolved
     if isinstance(reference, TextStringObject):
-        return NamedReferenceLink(reference, source_pdf)
+        return NamedReferenceLink(reference, source_pdf, container, key)
     if isinstance(reference, ArrayObject):
-        return DirectReferenceLink(reference)
+        return DirectReferenceLink(reference, container, key)
     return None

@@ -1058,6 +1058,148 @@ def test_resolve_links__named_destinations(catalog_dests):
     assert writer.get_named_dest_root()[1]["/D"][0] == writer.pages[1].indirect_reference
 
 
+def _linked_three_page_source() -> BytesIO:
+    """Three pages sharing one font; page 0 links to pages 1 and 2 through
+    direct, indirect, and named destinations."""
+    writer = PdfWriter()
+    shared_font = writer._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    }))
+    for index in range(3):
+        page = writer.add_blank_page(width=200, height=200)
+        content = DecodedStreamObject()
+        content.set_data(f"BT /F1 12 Tf 10 100 Td (MARKER_PAGE_{index}) Tj ET".encode())
+        page[NameObject("/Contents")] = writer._add_object(content)
+        page[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): shared_font}),
+        })
+    writer.add_named_destination("to_page1", 1)
+    writer.add_named_destination("to_page2", 2)
+
+    def make_link() -> DictionaryObject:
+        return DictionaryObject({
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Link"),
+            NameObject("/Rect"): RectangleObject([0, 0, 10, 10]),
+        })
+
+    # Direct destination to page 1 (selected below).
+    direct = make_link()
+    direct[NameObject("/Dest")] = ArrayObject([
+        writer.pages[1].indirect_reference, NameObject("/Fit"),
+    ])
+    # GoTo action with an indirect destination array to page 2 (not selected).
+    indirect = make_link()
+    indirect[NameObject("/A")] = DictionaryObject({
+        NameObject("/S"): NameObject("/GoTo"),
+        NameObject("/D"): writer._add_object(ArrayObject([
+            writer.pages[2].indirect_reference, NameObject("/Fit"),
+        ])),
+    })
+    # Named destinations to page 1 (selected) and page 2 (not selected).
+    named_selected = make_link()
+    named_selected[NameObject("/Dest")] = TextStringObject("to_page1")
+    named_unselected = make_link()
+    named_unselected[NameObject("/Dest")] = TextStringObject("to_page2")
+    writer.pages[0][NameObject("/Annots")] = ArrayObject([
+        writer._add_object(link) for link in (direct, indirect, named_selected, named_unselected)
+    ])
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+    return stream
+
+
+def _reachable_object_data(reader: PdfReader) -> bytes:
+    """Concatenate the data of every object reachable from the document root."""
+    seen = set()
+    stack = [reader.trailer["/Root"]]
+    chunks = []
+    while stack:
+        obj = stack.pop()
+        if isinstance(obj, IndirectObject):
+            if (obj.idnum, obj.generation) in seen:
+                continue
+            seen.add((obj.idnum, obj.generation))
+            obj = obj.get_object()
+            if obj is None:
+                continue
+        if isinstance(obj, StreamObject):
+            chunks.append(obj.get_data())
+            stack.extend(obj.values())
+        elif isinstance(obj, DictionaryObject):
+            stack.extend(obj.values())
+        elif isinstance(obj, ArrayObject):
+            stack.extend(obj)
+        elif isinstance(obj, (TextStringObject, ByteStringObject)):
+            chunks.append(str(obj).encode())
+    return b" ".join(chunks)
+
+
+def test_add_page__isolated_export():
+    """Exporting selected pages with isolated=True must not leak content of
+    unselected pages, while links between the selected pages and shared
+    resources keep working."""
+    reader = PdfReader(_linked_three_page_source())
+
+    writer = PdfWriter()
+    writer.add_page(reader.pages[0], isolated=True)
+    writer.add_page(reader.pages[1], isolated=True)
+    stream = BytesIO()
+    writer.write(stream)
+    data = stream.getvalue()
+
+    # The unselected page's unique marker is nowhere in the output file.
+    assert b"MARKER_PAGE_0" in data
+    assert b"MARKER_PAGE_1" in data
+    assert b"MARKER_PAGE_2" not in data
+
+    exported = PdfReader(BytesIO(data))
+    assert len(exported.pages) == 2
+
+    # The font shared by the selected pages is still shared (single object).
+    font0 = exported.pages[0]["/Resources"]["/Font"]["/F1"].indirect_reference
+    font1 = exported.pages[1]["/Resources"]["/Font"]["/F1"].indirect_reference
+    assert font0.idnum == font1.idnum
+
+    # Links between selected pages still work, both direct and named.
+    annots = [annotation.get_object() for annotation in exported.pages[0]["/Annots"]]
+    assert len(annots) == 4
+    direct = annots[0]["/Dest"]
+    assert direct[0].idnum == exported.pages[1].indirect_reference.idnum
+    assert annots[2]["/Dest"] == "to_page1"
+    destination = exported.named_destinations["to_page1"]
+    assert exported.get_destination_page_number(destination) == 1
+
+    # Links to the unselected page are neutralized: the annotation stays,
+    # but its /Dest resp. /A entry is gone, and the named destination is
+    # not carried over.
+    assert "/Dest" not in annots[1] and "/A" not in annots[1]
+    assert "/Dest" not in annots[3] and "/A" not in annots[3]
+    assert "to_page2" not in exported.named_destinations
+
+    # No object reachable from the re-parsed page tree contains the
+    # unselected page's unique marker.
+    reachable_data = _reachable_object_data(exported)
+    assert b"MARKER_PAGE_0" in reachable_data
+    assert b"MARKER_PAGE_1" in reachable_data
+    assert b"MARKER_PAGE_2" not in reachable_data
+
+
+def test_add_page__not_isolated_by_default():
+    """Without isolated=True, add_page() keeps its historical behavior of
+    dragging link targets into the output."""
+    reader = PdfReader(_linked_three_page_source())
+    writer = PdfWriter()
+    writer.add_page(reader.pages[0])
+    writer.add_page(reader.pages[1])
+    stream = BytesIO()
+    writer.write(stream)
+    assert b"MARKER_PAGE_2" in stream.getvalue()
+
+
 def test_append_with_direct_dests_dictionary():
     """
     Tests for #4027.

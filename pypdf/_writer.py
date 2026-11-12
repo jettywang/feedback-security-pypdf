@@ -237,6 +237,12 @@ class PdfWriter(PdfDocCommon):
         "Tracks links in pages added to the writer for resolving later."
         self._merged_in_pages: dict[IndirectObject | None, IndirectObject | None] = {}
         "Tracks pages added to the writer and what page they turned into."
+        self._isolate_pages = False
+        """If True, links to pages that were not added to the writer are
+        neutralized and objects that are unreachable from the added pages
+        are removed when writing, so that no content of unselected pages
+        leaks into the output. Enabled via the ``isolated`` argument of
+        :meth:`add_page` and :meth:`insert_page`."""
 
         # Security parameters.
         self._incremental_clone_object_count_limit = (
@@ -506,9 +512,13 @@ class PdfWriter(PdfDocCommon):
         page: PageObject,
         index: int,
         excluded_keys: Iterable[str] = (),
+        *,
+        isolated: bool = False,
     ) -> PageObject:
         if not isinstance(page, PageObject) or page.get(PagesAttributes.TYPE, None) != Core.PAGE:
             raise ValueError("Invalid page object")
+        if isolated:
+            self._isolate_pages = True
         assert self.flattened_pages is not None, "mypy"
         page_org = page
         excluded_keys = list(excluded_keys)
@@ -613,6 +623,8 @@ class PdfWriter(PdfDocCommon):
         self,
         page: PageObject,
         excluded_keys: Iterable[str] = (),
+        *,
+        isolated: bool = False,
     ) -> PageObject:
         """
         Add a page to this PDF file.
@@ -626,19 +638,30 @@ class PdfWriter(PdfDocCommon):
             page: The page to add to the document. Should be
                 an instance of :class:`PageObject<pypdf._page.PageObject>`
             excluded_keys:
+            isolated: If True, enable isolated export of the selected pages:
+                when the document is written, links and named destinations
+                pointing to pages that were not added to the writer are
+                neutralized (their ``/Dest`` resp. ``/A`` entry is removed),
+                and all objects that are not reachable from the added pages
+                are dropped, so that no content of unselected pages remains
+                in the output. Links between the added pages and shared
+                resources such as fonts are preserved. Once enabled for one
+                page, isolation applies to the whole document.
 
         Returns:
             The added PageObject.
 
         """
         assert self.flattened_pages is not None, "mypy"
-        return self._add_page(page, len(self.flattened_pages), excluded_keys)
+        return self._add_page(page, len(self.flattened_pages), excluded_keys, isolated=isolated)
 
     def insert_page(
         self,
         page: PageObject,
         index: int = 0,
         excluded_keys: Iterable[str] = (),
+        *,
+        isolated: bool = False,
     ) -> PageObject:
         """
         Insert a page in this PDF file. The page is usually acquired from a
@@ -648,6 +671,8 @@ class PdfWriter(PdfDocCommon):
             page: The page to add to the document.
             index: Position at which the page will be inserted.
             excluded_keys:
+            isolated: If True, enable isolated export of the selected pages.
+                See :meth:`add_page` for details.
 
         Returns:
             The added PageObject.
@@ -659,8 +684,8 @@ class PdfWriter(PdfDocCommon):
         if index < 0:
             raise ValueError("Invalid index value")
         if index >= len(self.flattened_pages):
-            return self.add_page(page, excluded_keys)
-        return self._add_page(page, index, excluded_keys)
+            return self.add_page(page, excluded_keys, isolated=isolated)
+        return self._add_page(page, index, excluded_keys, isolated=isolated)
 
     def _get_page_number_by_indirect(
         self, indirect_reference: int | NullObject | IndirectObject | None
@@ -1340,10 +1365,13 @@ class PdfWriter(PdfDocCommon):
         known_names: set[str] | None = None
         for (new_link, old_link) in self._unresolved_links:
             old_page = old_link.find_referenced_page()
-            if not old_page:
-                continue
-            new_page = self._merged_in_pages.get(old_page)
+            new_page = self._merged_in_pages.get(old_page) if old_page is not None else None
             if new_page is None:
+                if self._isolate_pages:
+                    # The link points to a page that was not added to the
+                    # writer; cut the reference so that the unselected page
+                    # is not dragged into the output.
+                    new_link.remove_reference()
                 continue
             if isinstance(new_link, NamedReferenceLink):
                 if known_names is None:
@@ -1351,6 +1379,41 @@ class PdfWriter(PdfDocCommon):
                 new_link.patch_reference(self, new_page, known_names=known_names)
             else:
                 new_link.patch_reference(self, new_page)
+
+    def _sweep_unreachable_objects(self) -> None:
+        """Drop all objects that cannot be reached from the document catalog,
+        the /Info dictionary, or the encryption dictionary.
+
+        Used for isolated page export: after links to unselected pages have
+        been neutralized, the objects those links dragged in (page objects,
+        their content streams, and private resources) are no longer
+        referenced and are removed here, while objects shared with the
+        selected pages (such as fonts) stay reachable and are kept.
+        """
+        reachable: set[int] = set()
+        stack: list[PdfObject] = []
+        for root in (self._root_object, self._info_obj, self._encrypt_entry):
+            if root is None:
+                continue
+            reference = getattr(root, "indirect_reference", None)
+            stack.append(reference if reference is not None else root)
+        while stack:
+            obj = stack.pop()
+            if isinstance(obj, IndirectObject):
+                if obj.pdf is not self or obj.idnum in reachable:
+                    continue
+                reachable.add(obj.idnum)
+                if 0 < obj.idnum <= len(self._objects):
+                    target = self._objects[obj.idnum - 1]
+                    if target is not None:
+                        stack.append(target)
+            elif isinstance(obj, DictionaryObject):
+                stack.extend(obj.values())
+            elif isinstance(obj, ArrayObject):
+                stack.extend(obj)
+        for idnum in range(1, len(self._objects) + 1):
+            if idnum not in reachable:
+                self._objects[idnum - 1] = None
 
     def write_stream(self, stream: StreamType) -> None:
         if hasattr(stream, "mode") and "b" not in stream.mode:
@@ -1361,6 +1424,8 @@ class PdfWriter(PdfDocCommon):
                 stream_name=stream.name,
             )
         self._resolve_links()
+        if self._isolate_pages and not self.incremental:
+            self._sweep_unreachable_objects()
 
         if self.incremental:
             assert self._reader is not None, "mypy"
