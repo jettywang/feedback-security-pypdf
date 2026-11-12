@@ -6,7 +6,7 @@ import subprocess
 from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
 import pytest
@@ -4409,3 +4409,243 @@ def test_generate_file_identifiers__update() -> None:
     writer.generate_file_identifiers()
     assert writer._ID[0] == id_permanent
     assert writer._ID[1] != id_changing
+
+
+def _build_two_page_form_document() -> PdfWriter:
+    """
+    Build a two-page form document covering shared parent fields, multi-page
+    widgets, missing appearance streams, and hidden/default-only values.
+    """
+    writer = PdfWriter()
+    page1 = writer.add_blank_page(612, 792)
+    page2 = writer.add_blank_page(612, 792)
+
+    helv = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    acro_form = DictionaryObject({
+        NameObject("/Fields"): ArrayObject(),
+        NameObject("/DA"): TextStringObject("/Helv 0 Tf 0 g"),
+        NameObject("/DR"): DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/Helv"): helv})
+        }),
+    })
+    writer._root_object[NameObject("/AcroForm")] = acro_form
+    fields = cast(ArrayObject, acro_form["/Fields"])
+
+    annots1 = ArrayObject()
+    annots2 = ArrayObject()
+    page1[NameObject("/Annots")] = annots1
+    page2[NameObject("/Annots")] = annots2
+
+    def appearance_stream(text: str) -> IndirectObject:
+        stream = DecodedStreamObject()
+        stream.set_data(f"BT /Helv 10 Tf 2 4 Td ({text}) Tj ET".encode())
+        stream[NameObject("/Type")] = NameObject("/XObject")
+        stream[NameObject("/Subtype")] = NameObject("/Form")
+        stream[NameObject("/BBox")] = ArrayObject(
+            [NumberObject(0), NumberObject(0), NumberObject(100), NumberObject(20)]
+        )
+        stream[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/Helv"): helv})
+        })
+        return writer._add_object(stream)
+
+    def widget(rect: tuple[int, int, int, int], **entries: Any) -> DictionaryObject:
+        widget_dict = DictionaryObject({
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Widget"),
+            NameObject("/Rect"): RectangleObject(rect),
+        })
+        for key, value in entries.items():
+            widget_dict[NameObject(f"/{key}")] = value
+        return widget_dict
+
+    # Visible text field on page 1 without an appearance stream.
+    name_field = widget(
+        (50, 700, 200, 720), FT=NameObject("/Tx"), T=TextStringObject("name"),
+        V=TextStringObject("Alice"), F=NumberObject(4),
+    )
+    name_ref = writer._add_object(name_field)
+    fields.append(name_ref)
+    annots1.append(name_ref)
+
+    # Hidden text field on page 1: must neither be rendered nor kept.
+    secret_field = widget(
+        (50, 650, 200, 670), FT=NameObject("/Tx"), T=TextStringObject("secret"),
+        V=TextStringObject("TOP-SECRET-VALUE"),
+        DV=TextStringObject("TOP-SECRET-DEFAULT"), F=NumberObject(2),
+    )
+    secret_ref = writer._add_object(secret_field)
+    fields.append(secret_ref)
+    annots1.append(secret_ref)
+
+    # Shared parent field with one kid widget on each page.
+    kid1 = widget((50, 600, 200, 620))
+    kid2 = widget((50, 600, 200, 620))
+    kid1_ref = writer._add_object(kid1)
+    kid2_ref = writer._add_object(kid2)
+    shared_field = DictionaryObject({
+        NameObject("/FT"): NameObject("/Tx"),
+        NameObject("/T"): TextStringObject("shared"),
+        NameObject("/V"): TextStringObject("SHARED-SENSITIVE"),
+        NameObject("/DV"): TextStringObject("SHARED-DEFAULT"),
+        NameObject("/Kids"): ArrayObject([kid1_ref, kid2_ref]),
+    })
+    shared_ref = writer._add_object(shared_field)
+    kid1[NameObject("/Parent")] = shared_ref
+    kid2[NameObject("/Parent")] = shared_ref
+    fields.append(shared_ref)
+    annots1.append(kid1_ref)
+    annots2.append(kid2_ref)
+
+    # Text field on page 2 with only a default value.
+    history_field = widget(
+        (50, 550, 200, 570), FT=NameObject("/Tx"), T=TextStringObject("history"),
+        V=TextStringObject(""), DV=TextStringObject("HISTORICAL-DEFAULT"),
+        F=NumberObject(4),
+    )
+    history_ref = writer._add_object(history_field)
+    fields.append(history_ref)
+    annots2.append(history_ref)
+
+    # Field without any widget: its value must not survive a secure export.
+    orphan_field = DictionaryObject({
+        NameObject("/FT"): NameObject("/Tx"),
+        NameObject("/T"): TextStringObject("orphan"),
+        NameObject("/V"): TextStringObject("ORPHAN-VALUE"),
+    })
+    fields.append(writer._add_object(orphan_field))
+
+    # Checked checkbox on page 1 with existing appearance streams.
+    subscribe_field = widget(
+        (50, 500, 70, 520), FT=NameObject("/Btn"), T=TextStringObject("subscribe"),
+        V=NameObject("/Yes"), AS=NameObject("/Yes"), F=NumberObject(4),
+        AP=DictionaryObject({
+            NameObject("/N"): DictionaryObject({
+                NameObject("/Yes"): appearance_stream("CHECKED-MARK"),
+                NameObject("/Off"): appearance_stream("OFFSTATE-SECRET"),
+            })
+        }),
+    )
+    subscribe_ref = writer._add_object(subscribe_field)
+    fields.append(subscribe_ref)
+    annots1.append(subscribe_ref)
+
+    return writer
+
+
+def _assert_not_in_pdf_bytes(data: bytes, text: str) -> None:
+    assert text.encode("latin-1") not in data
+    assert b"\xfe\xff" + text.encode("utf-16-be") not in data
+
+
+def test_flatten_form_fields_secure_export():
+    """
+    Secure flattening renders the visible values, removes all widgets and
+    purges the field tree so hidden values, default values and values of
+    fields without an exported widget can no longer be read back.
+    """
+    writer = _build_two_page_form_document()
+    writer.flatten_form_fields(secure=True)
+
+    stream = BytesIO()
+    writer.write(stream)
+    data = stream.getvalue()
+
+    reader = PdfReader(BytesIO(data))
+    assert "/AcroForm" not in reader.trailer["/Root"]
+    assert not reader.get_fields()
+    for page in reader.pages:
+        for annotation in page.get("/Annots", []):
+            assert annotation.get_object().get("/Subtype") != "/Widget"
+
+    # Visible values are rendered as page content.
+    page1_text = reader.pages[0].extract_text()
+    page2_text = reader.pages[1].extract_text()
+    assert "Alice" in page1_text
+    assert "CHECKED-MARK" in page1_text
+    assert "SHARED-SENSITIVE" in page1_text  # kid widget of the shared parent
+    assert "SHARED-SENSITIVE" in page2_text  # second kid on the other page
+    assert "TOP-SECRET" not in page1_text  # hidden field is not rendered
+
+    # No removed value survives anywhere in the file.
+    for removed in (
+        "TOP-SECRET-VALUE",
+        "TOP-SECRET-DEFAULT",
+        "SHARED-DEFAULT",
+        "HISTORICAL-DEFAULT",
+        "ORPHAN-VALUE",
+        "OFFSTATE-SECRET",
+        "secret",
+        "orphan",
+    ):
+        _assert_not_in_pdf_bytes(data, removed)
+
+
+def test_flatten_form_fields_non_secure_keeps_field_values():
+    """Non-secure flattening renders appearances and drops the widgets but
+    keeps the field tree (and thus the values) intact."""
+    writer = _build_two_page_form_document()
+    writer.flatten_form_fields()
+
+    stream = BytesIO()
+    writer.write(stream)
+    data = stream.getvalue()
+
+    reader = PdfReader(BytesIO(data))
+    fields = reader.get_fields()
+    assert fields is not None
+    assert fields["name"]["/V"] == "Alice"
+    assert fields["secret"]["/V"] == "TOP-SECRET-VALUE"
+    assert "Alice" in reader.pages[0].extract_text()
+    for page in reader.pages:
+        for annotation in page.get("/Annots", []):
+            assert annotation.get_object().get("/Subtype") != "/Widget"
+
+
+def test_flatten_form_fields_secure_requires_whole_document():
+    writer = _build_two_page_form_document()
+    with pytest.raises(PyPdfError, match="whole document"):
+        writer.flatten_form_fields(writer.pages[0], secure=True)
+
+
+def test_flatten_form_fields_secure_missing_appearance_fails():
+    """A visible valued field without a usable appearance stream must
+    produce a clear error and leave the document unmodified."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(612, 792)
+    field = DictionaryObject({
+        NameObject("/Type"): NameObject("/Annot"),
+        NameObject("/Subtype"): NameObject("/Widget"),
+        NameObject("/Rect"): RectangleObject((50, 700, 70, 720)),
+        NameObject("/FT"): NameObject("/Btn"),
+        NameObject("/T"): TextStringObject("chk"),
+        NameObject("/V"): NameObject("/Yes"),
+        NameObject("/AS"): NameObject("/Yes"),
+        NameObject("/F"): NumberObject(4),
+    })
+    field_ref = writer._add_object(field)
+    writer._root_object[NameObject("/AcroForm")] = DictionaryObject({
+        NameObject("/Fields"): ArrayObject([field_ref]),
+    })
+    page[NameObject("/Annots")] = ArrayObject([field_ref])
+
+    with pytest.raises(PyPdfError, match="Cannot flatten form field 'chk'"):
+        writer.flatten_form_fields(secure=True)
+
+    # The failure happened before anything was modified.
+    assert "/AcroForm" in writer._root_object
+    assert len(page["/Annots"]) == 1
+
+
+def test_flatten_form_fields_without_form_is_a_no_op():
+    writer = PdfWriter()
+    writer.add_blank_page(72, 72)
+    writer.flatten_form_fields()
+    writer.flatten_form_fields(secure=True)
+    stream = BytesIO()
+    writer.write(stream)
+    PdfReader(BytesIO(stream.getvalue()))

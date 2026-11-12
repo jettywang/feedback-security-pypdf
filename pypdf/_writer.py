@@ -67,6 +67,7 @@ from ._utils import (
 from .actions import Action
 from .constants import AnnotationDictionaryAttributes as AA
 from .constants import (
+    AnnotationFlag,
     CatalogAttributes,
     Core,
     GoToActionArguments,
@@ -1075,6 +1076,287 @@ class PdfWriter(PdfDocCommon):
 
                 if appearance_stream_obj and flatten:
                     self._add_apstream_object(page, appearance_stream_obj, field, rectangle[0], rectangle[1])
+
+    @staticmethod
+    def _flatten_field_of(annotation: DictionaryObject) -> DictionaryObject:
+        """Return the field dictionary a widget annotation belongs to."""
+        field = annotation
+        while "/FT" not in field:
+            parent = field.get(PG.PARENT)
+            if not isinstance(parent, (DictionaryObject, IndirectObject)):
+                break
+            field = cast(DictionaryObject, parent.get_object())
+        return field
+
+    def _flatten_check_widget(
+        self,
+        annotation: DictionaryObject,
+        field: DictionaryObject,
+        page: PageObject,
+        secure: bool,
+    ) -> None:
+        """
+        Verify that the visible value of one widget can be rendered reliably.
+
+        Raises a clear error in secure mode (and logs a warning otherwise)
+        if no appearance is available and none can be generated.
+        """
+        flags = annotation.get(AA.F, 0)
+        if flags & (AnnotationFlag.INVISIBLE | AnnotationFlag.HIDDEN):
+            return  # Hidden widgets are removed without being rendered.
+        field_type = field.get(FA.FT)
+        if field_type == "/Sig":
+            return  # Signatures are never rendered by flattening.
+        value = annotation.get_inherited(FA.V)
+        appearance = annotation.get(AA.AP)
+        if field_type == "/Btn":
+            state = value if isinstance(value, NameObject) else annotation.get(AA.AS)
+            if state in (None, "/Off"):
+                return  # Nothing meaningful to render.
+            normal: Any = (
+                appearance.get_object().get("/N", {}) if appearance is not None else {}
+            )
+            if isinstance(normal, (DictionaryObject, IndirectObject)):
+                normal = normal.get_object()
+            if isinstance(normal, DictionaryObject) and state in normal:
+                return
+        elif field_type in ("/Tx", "/Ch"):
+            if appearance is not None and "/N" in appearance.get_object():
+                return
+            if value in (None, "", []):
+                return  # Nothing to render; an empty appearance can be generated.
+            return  # pypdf can always generate a text appearance stream.
+        else:
+            if value in (None, "", []):
+                return
+            if appearance is not None and "/N" in appearance.get_object():
+                return
+        field_name = self._get_qualified_field_name(parent=field) or field.get("/T", "?")
+        message = (
+            f"Cannot flatten form field {field_name!r} on page "
+            f"{self.get_page_number(page)}: "
+            "the field has a value but no appearance stream, and pypdf cannot "
+            "generate one for this field type. Regenerate the appearances first "
+            "(for example in a viewer or via update_page_form_field_values) or "
+            "remove the field before exporting."
+        )
+        if secure:
+            raise PyPdfError(message)
+        logger_warning(message, source=__name__)
+
+    def _flatten_render_widget(
+        self,
+        page: PageObject,
+        annotation: DictionaryObject,
+        field: DictionaryObject,
+        acro_form: DictionaryObject,
+        xobject_name: str,
+    ) -> StreamObject | None:
+        """
+        Draw one widget's appearance stream into the page content.
+
+        Returns the appearance stream that was drawn, if any.
+        """
+        flags = annotation.get(AA.F, 0)
+        if flags & (AnnotationFlag.INVISIBLE | AnnotationFlag.HIDDEN):
+            return None  # Hidden widgets must not become visible page content.
+        field_type = field.get(FA.FT)
+        if field_type == "/Sig":
+            return None  # Do not render signatures.
+        value = annotation.get_inherited(FA.V)
+        appearance_stream_obj: StreamObject | None = None
+        if field_type == "/Btn":
+            appearance = annotation.get(AA.AP)
+            if appearance is None:
+                return None
+            normal = appearance.get_object().get("/N")
+            if normal is None:
+                return None
+            normal = cast(DictionaryObject, normal.get_object())
+            state = value if isinstance(value, NameObject) else annotation.get(AA.AS)
+            if state not in normal:
+                state = NameObject("/Off")
+            stream = normal.get(state)
+            if stream is not None:
+                appearance_stream_obj = cast(StreamObject, stream.get_object())
+        elif field_type in ("/Tx", "/Ch"):
+            appearance = annotation.get(AA.AP)
+            if appearance is not None and "/N" in appearance.get_object():
+                appearance_stream_obj = cast(
+                    StreamObject, appearance.get_object()["/N"].get_object()
+                )
+            else:
+                appearance_stream_obj = TextStreamAppearance.from_text_annotation(
+                    self, page, True, acro_form, field, annotation
+                )
+        else:
+            appearance = annotation.get(AA.AP)
+            if appearance is not None and "/N" in appearance.get_object():
+                appearance_stream_obj = cast(
+                    StreamObject, appearance.get_object()["/N"].get_object()
+                )
+        if appearance_stream_obj is None:
+            return None
+        rectangle = cast(RectangleObject, annotation[AA.Rect])
+        self._add_apstream_object(
+            page, appearance_stream_obj, xobject_name, rectangle[0], rectangle[1]
+        )
+        return appearance_stream_obj
+
+    @staticmethod
+    def _flatten_collect_ap_refs(
+        dictionary: DictionaryObject, refs: list[IndirectObject]
+    ) -> None:
+        """Collect indirect references of a widget's /AP appearance streams."""
+        appearance = dictionary.get(AA.AP)
+        if isinstance(appearance, IndirectObject):
+            refs.append(appearance)
+            appearance = cast(DictionaryObject, appearance.get_object())
+        if not isinstance(appearance, DictionaryObject):
+            return
+        for entry in ("/N", "/R", "/D"):
+            sub = appearance.get(entry)
+            if isinstance(sub, IndirectObject):
+                refs.append(sub)
+                sub = sub.get_object()
+            if isinstance(sub, StreamObject):
+                continue  # Direct stream; collected via its reference above if any.
+            if isinstance(sub, DictionaryObject):
+                # Appearance sub-dictionary (e.g. button states /On and /Off).
+                for state in sub.values():
+                    if isinstance(state, IndirectObject):
+                        refs.append(state)
+
+    def _blank_object(self, reference: IndirectObject) -> None:
+        """Replace an object in the writer's object table with a null object."""
+        if 0 < reference.idnum <= len(self._objects):
+            self._objects[reference.idnum - 1] = NullObject()
+
+    def flatten_form_fields(
+        self,
+        page: PageObject | list[PageObject] | None = None,
+        *,
+        secure: bool = False,
+    ) -> None:
+        """
+        Flatten form fields: draw the widget appearances into the page
+        content and remove the widget annotations.
+
+        Args:
+            page: `PageObject` - the page to flatten.
+                `List[PageObject]` - the pages to flatten.
+                `None` - all pages (required when `secure` is True).
+            secure: If True, perform a secure export of the whole document:
+                all pages are flattened, every widget annotation is removed,
+                the complete `/AcroForm` field tree is deleted, and the
+                corresponding objects are blanked, so that filled values,
+                default values (`/DV`), hidden fields, and values of fields
+                without a visible widget can no longer be read from the
+                output. If a visible field value cannot be rendered reliably
+                (no appearance stream and none can be generated), a
+                `PyPdfError` is raised before anything is modified.
+
+        """
+        if CatalogAttributes.ACRO_FORM not in self._root_object:
+            return  # No form: nothing to flatten.
+        acro_form = self._root_object[CatalogAttributes.ACRO_FORM]
+        if isinstance(acro_form, IndirectObject):
+            acro_form = cast(DictionaryObject, acro_form.get_object())
+        if not isinstance(acro_form, DictionaryObject):
+            return
+        if InteractiveFormDictEntries.Fields not in acro_form:
+            return
+        if secure and page is not None:
+            raise PyPdfError(
+                "Secure flattening must process the whole document; "
+                "call flatten_form_fields without a 'page' argument."
+            )
+        if page is None:
+            pages = list(self.pages)
+        elif isinstance(page, list):
+            pages = page
+        else:
+            pages = [page]
+
+        # Collect the widgets first so that a failing secure export leaves
+        # the document unmodified.
+        widgets_per_page: list[
+            tuple[PageObject, list[tuple[Any, DictionaryObject, DictionaryObject]]]
+        ] = []
+        for p in pages:
+            annotations = p.get(PG.ANNOTS)
+            if isinstance(annotations, IndirectObject):
+                annotations = cast(ArrayObject, annotations.get_object())
+            if not isinstance(annotations, ArrayObject):
+                continue
+            widgets = []
+            for entry in annotations:
+                annotation = entry.get_object()
+                if (
+                    isinstance(annotation, DictionaryObject)
+                    and annotation.get("/Subtype") == "/Widget"
+                ):
+                    widgets.append((entry, annotation, self._flatten_field_of(annotation)))
+            widgets_per_page.append((p, widgets))
+
+        for p, widgets in widgets_per_page:
+            for _, annotation, field in widgets:
+                self._flatten_check_widget(annotation, field, p, secure)
+
+        appearance_refs: list[IndirectObject] = []
+        used_appearance_idnums: set[int] = set()
+        counter = 0
+        for p, widgets in widgets_per_page:
+            annotations = p.get(PG.ANNOTS)
+            if isinstance(annotations, IndirectObject):
+                annotations = cast(ArrayObject, annotations.get_object())
+            for entry, annotation, field in widgets:
+                counter += 1
+                rendered = self._flatten_render_widget(
+                    p, annotation, field, acro_form, f"{counter}"
+                )
+                cast(ArrayObject, annotations).remove(entry)
+                if secure:
+                    if rendered is not None:
+                        # The drawn appearance stream is still referenced by
+                        # the page resources and must not be blanked.
+                        reference = getattr(rendered, "indirect_reference", None)
+                        if reference is not None:
+                            used_appearance_idnums.add(reference.idnum)
+                    self._flatten_collect_ap_refs(annotation, appearance_refs)
+                    if isinstance(entry, IndirectObject):
+                        self._blank_object(entry)
+
+        if not secure:
+            return
+        # Purge the whole field tree so that no field value (filled values,
+        # /DV defaults, hidden fields, values of widgets on other pages or
+        # without any widget) remains in the written file.
+        tree_refs: list[IndirectObject] = []
+        acro_form_entry = self._root_object[CatalogAttributes.ACRO_FORM]
+        if isinstance(acro_form_entry, IndirectObject):
+            tree_refs.append(acro_form_entry)
+        fields = acro_form.get(InteractiveFormDictEntries.Fields)
+        if isinstance(fields, IndirectObject):
+            tree_refs.append(fields)
+            fields = cast(ArrayObject, fields.get_object())
+        stack = list(fields) if isinstance(fields, ArrayObject) else []
+        while stack:
+            item = stack.pop()
+            if isinstance(item, IndirectObject):
+                tree_refs.append(item)
+                item = item.get_object()
+            if isinstance(item, DictionaryObject):
+                kids = item.get(FA.Kids)
+                if isinstance(kids, IndirectObject):
+                    tree_refs.append(kids)
+                    kids = kids.get_object()
+                if isinstance(kids, ArrayObject):
+                    stack.extend(kids)
+        del self._root_object[CatalogAttributes.ACRO_FORM]
+        for reference in tree_refs + appearance_refs:
+            if reference.idnum not in used_appearance_idnums:
+                self._blank_object(reference)
 
     def reattach_fields(
         self, page: PageObject | None = None

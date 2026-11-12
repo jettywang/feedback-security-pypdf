@@ -53,6 +53,18 @@ will convert form field  contents to regular PDF content. Afterwards, use
 {func}`~pypdf.PdfWriter.remove_annotations` with `subtypes="/Widget"`
 to remove all form fields to get an actual flattened PDF.
 
+Alternatively, {func}`~pypdf.PdfWriter.flatten_form_fields` flattens the
+form in one step: it draws the widget appearances into the page content and
+removes the widget annotations.
+
+When the flattened PDF is meant to leave your organization, use
+`flatten_form_fields(secure=True)`. This secure export flattens the whole
+document, deletes the complete `/AcroForm` field tree, and blanks the
+corresponding objects, so that filled values, default values (`/DV`), hidden
+fields, and values of fields without a visible widget can no longer be read
+from the output. If a visible field value has no appearance stream and none
+can be generated, a `PyPdfError` is raised before anything is modified.
+
 ## Some notes about form fields and annotations
 
 PDF forms have a dual-nature approach to the fields:
