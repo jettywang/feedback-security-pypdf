@@ -64,7 +64,8 @@ from ._utils import (
     deprecation_with_replacement,
     logger_warning,
 )
-from .actions import Action
+from .actions import Action, ActionPolicy, ActionScanner
+from .actions import sanitize_actions as _sanitize_actions
 from .constants import AnnotationDictionaryAttributes as AA
 from .constants import (
     CatalogAttributes,
@@ -803,6 +804,71 @@ class PdfWriter(PdfDocCommon):
             >>> output.add_open_action(JavaScript("this.print({bUI:true,bSilent:false,bShrinkToFit:true});"))
         """
         return Action._create_open_action(self, action)
+
+    def scan_actions(
+        self, policy: ActionPolicy | None = None
+    ) -> ActionScanner:
+        """
+        Inspect every action reachable from this document.
+
+        This never executes any action. It resolves indirect references and
+        walks the catalog open action, document/page/annotation/field
+        additional actions, annotation ``/A`` entries, the document level
+        JavaScript name tree and their ``/Next`` chains (including arrays and
+        cyclic chains). Each finding records where the action was referenced
+        and why the policy accepted or rejected it.
+
+        Args:
+            policy: Policy deciding which actions are acceptable. A default
+                :class:`~pypdf.actions.ActionPolicy` keeping only in-document
+                navigation and ``http``/``https`` links is used when omitted.
+
+        Returns:
+            An :class:`~pypdf.actions.ActionScanner` whose
+            :attr:`~pypdf.actions.ActionScanner.findings` list describes every
+            reachable action.
+
+        Example:
+            >>> from pypdf import PdfWriter
+            >>> writer = PdfWriter()
+            >>> scanner = writer.scan_actions()
+            >>> for finding in scanner.denied_findings():
+            ...     print(finding.action_type, finding.source_paths, finding.reason)
+        """
+        scanner = ActionScanner(self, policy)
+        scanner.scan()
+        return scanner
+
+    def sanitize_actions(
+        self, policy: ActionPolicy | None = None
+    ) -> ActionScanner:
+        """
+        Remove every action rejected by ``policy`` in place.
+
+        Allowed navigation actions, annotation ``/Dest`` destinations and
+        catalog destination arrays are preserved. Run
+        :meth:`scan_actions` afterwards on the same writer to verify that no
+        disallowed action remains reachable.
+
+        Args:
+            policy: Policy deciding which actions to keep. A default
+                :class:`~pypdf.actions.ActionPolicy` is used when omitted.
+
+        Returns:
+            An :class:`~pypdf.actions.ActionScanner` holding the findings of
+            the cleanup scan, including the reason and source location of each
+            removed action.
+
+        Example:
+            >>> from pypdf import PdfWriter
+            >>> writer = PdfWriter()
+            >>> scanner = writer.sanitize_actions()
+            >>> assert not writer.scan_actions().denied_findings()
+        """
+        _sanitize_actions(self, policy)
+        verification = ActionScanner(self, policy)
+        verification.scan()
+        return verification
 
     def add_attachment(self, filename: str, data: str | bytes) -> "EmbeddedFile":
         """

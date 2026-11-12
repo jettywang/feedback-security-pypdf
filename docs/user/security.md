@@ -53,6 +53,55 @@ For *PdfWriter* instances, the following limits are employed for incremental rea
 * `incremental_clone_object_id_limit` limits the maximum object ID to read during cloning. It defaults to
   1 000 000. Setting it to `None` will fully disable this limit.
 
+## Inspecting and removing actions
+
+PDF documents can carry actions in several places: the catalog open action,
+the additional-actions (`/AA`) dictionaries of the document, pages,
+annotations and form fields, the `/A` entry of link annotations and the
+document level JavaScript name tree. Some of these actions execute scripts,
+launch programs or open external files. A download service that only wants to
+keep in-document navigation and explicitly allowed web links can inspect and
+remove them without ever executing anything.
+
+{py:class}`~pypdf.actions.ActionScanner` resolves indirect references, walks
+`/Next` chains (a single action dictionary or an array of them) and terminates
+on cyclic chains. Every {py:class}`~pypdf.actions.ActionFinding` records the
+action type, the decision reason and every location from which the action is
+reachable.
+
+The default {py:class}`~pypdf.actions.ActionPolicy` keeps `/GoTo` and
+`/SetOCGState` navigation plus `/URI` actions using the `http` and `https`
+schemes. Everything else, including `/JavaScript`, `/Launch`, `/GoToR`,
+`/GoToE` and rendition actions, is rejected. The accepted URI schemes, hosts
+and extra action types are configurable.
+
+```{testsetup}
+pypdf_test_setup("user/security-actions", {
+    "example.pdf": "../resources/example.pdf",
+})
+```
+
+```{testcode}
+from pypdf import PdfWriter
+from pypdf.actions import ActionPolicy
+
+writer = PdfWriter(clone_from="example.pdf")
+
+scanner = writer.scan_actions()
+for finding in scanner.denied_findings():
+    print(finding.action_type, finding.source_paths, finding.reason)
+
+# Only allow links to one explicit host in addition to in-document navigation.
+policy = ActionPolicy(allowed_uri_hosts={"example.test"})
+verification = writer.sanitize_actions(policy)
+assert verification.denied_findings() == []
+
+writer.write("out-sanitized-actions.pdf")
+```
+
+Plain navigation that is not represented as an action is always preserved:
+catalog destination arrays and annotation `/Dest` entries are left untouched.
+
 ## Reporting possible vulnerabilities
 
 Please refer to our [security policy](https://github.com/py-pdf/pypdf/security/policy).
